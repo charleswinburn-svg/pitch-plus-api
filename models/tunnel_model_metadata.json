@@ -1,0 +1,27 @@
+{
+  "features": [
+    "tunnel_diff_x",
+    "tunnel_diff_z",
+    "tunnel_distance",
+    "time_after_tunnel",
+    "late_break",
+    "plate_distance",
+    "release_diff_x",
+    "release_diff_z",
+    "release_distance",
+    "pitch_type_cat",
+    "p_throws_cat",
+    "release_speed",
+    "delta_velo"
+  ],
+  "target": "xRV_stage3_target",
+  "train_years": [
+    2022,
+    2023,
+    2024
+  ],
+  "target_year": 2025,
+  "val_r2": 0.027033532105546043,
+  "holdout_r2": 0.020732879638671875,
+  "best_iterations": 297
+}

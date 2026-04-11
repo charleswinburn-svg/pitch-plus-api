@@ -1,0 +1,27 @@
+{
+  "features": [
+    "plate_x",
+    "plate_z",
+    "plate_x_adj",
+    "zone_center_dist",
+    "out_of_zone_dist",
+    "in_zone",
+    "pfx_x",
+    "pfx_z",
+    "release_speed",
+    "stand_cat",
+    "same_side"
+  ],
+  "target": "xRV_residual",
+  "train_years": [
+    2022,
+    2023,
+    2024
+  ],
+  "target_year": 2025,
+  "cv_rmse": 0.1604874737142527,
+  "cv_r2": 0.03601182776347944,
+  "holdout_rmse": 0.16887835014020802,
+  "holdout_r2": 0.023742370263111545,
+  "best_iterations": 126
+}

@@ -1,0 +1,17 @@
+{
+  "weights": {
+    "stuff": 0.8268003463745117,
+    "location": 0.8665236234664917,
+    "tunnel": 0.21111805737018585
+  },
+  "intercept": 0.004898399580270052,
+  "holdout_r2": 0.03303349018096924,
+  "holdout_rmse": 0.17286215496474291,
+  "naive_sum_r2": 0.013040542602539062,
+  "component_correlations": {
+    "stuff": 0.03407801559098999,
+    "location": 0.175025780591307,
+    "tunnel": 0.15306583732062054
+  },
+  "deployment_formula": "xRV_predicted = w_stuff*xRV_stuff + w_loc*xRV_location + w_tunnel*xRV_tunnel + intercept"
+}
