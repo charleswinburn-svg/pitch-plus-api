@@ -163,10 +163,60 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
             X = df.loc[mask, location_features].values
             df.loc[mask, 'xRV_location'] = model.predict(X)
 
-    # ── Tunnel features (simplified — defaults to 0 for live single pitches) ──
+    # ── Tunnel features: real trajectory math ──
+    PLATE_Y = 17.0 / 12.0
+    y_tun = PLATE_Y + 23.0
+    y0 = 50.0
+
+    a_ = 0.5 * df['ay'].values
+    b_ = df['vy0'].values
+    c_ = y0 - y_tun
+    with np.errstate(invalid='ignore', divide='ignore'):
+        disc = b_**2 - 4 * a_ * c_
+        t_tun = np.where(disc >= 0,
+                         (-b_ - np.sqrt(np.maximum(disc, 0))) / (2 * a_),
+                         np.nan)
+        t_tun = np.where((t_tun > 0) & (t_tun < 0.5), t_tun, np.nan)
+
+    # Trajectory at tunnel point — needs vx0 and ax which may be missing
+    # If missing, fall back to release_pos (no x deflection)
+    vx0 = df['vx0'].fillna(0).values if 'vx0' in df.columns else np.zeros(len(df))
+    ax  = df['ax'].fillna(0).values if 'ax' in df.columns else np.zeros(len(df))
+    df['tunnel_x'] = (df['release_pos_x'].values + vx0 * t_tun + 0.5 * ax * t_tun**2)
+    df['tunnel_z'] = (df['release_pos_z'].values + df['vz0'].values * t_tun
+                      + 0.5 * df['az'].values * t_tun**2)
+
+    c_p = y0 - PLATE_Y
+    disc_p = b_**2 - 4 * a_ * c_p
+    with np.errstate(invalid='ignore', divide='ignore'):
+        t_p = np.where(disc_p >= 0,
+                       (-b_ - np.sqrt(np.maximum(disc_p, 0))) / (2 * a_),
+                       np.nan)
+    df['time_after_tunnel'] = t_p - t_tun
+
+    # Diffs vs pitcher's fastball tunnel anchor (from baselines)
+    df['tunnel_diff_x'] = 0.0
+    df['tunnel_diff_z'] = 0.0
+    df['plate_distance'] = 0.0
+    for i, row in df.iterrows():
+        pid = str(int(row['pitcher'])) if pd.notna(row.get('pitcher')) else None
+        bl = pitcher_baselines.get(pid) if pid else None
+        if bl and 'fb_tunnel_x' in bl:
+            df.at[i,'tunnel_diff_x'] = (row['tunnel_x'] - bl['fb_tunnel_x']) if pd.notna(row['tunnel_x']) else 0.0
+            df.at[i,'tunnel_diff_z'] = (row['tunnel_z'] - bl['fb_tunnel_z']) if pd.notna(row['tunnel_z']) else 0.0
+            df.at[i,'plate_distance'] = np.sqrt(
+                (row['plate_x'] - bl['fb_plate_x'])**2 +
+                (row['plate_z'] - bl['fb_plate_z'])**2
+            ) * 12
+
+    df['tunnel_distance'] = np.sqrt(df['tunnel_diff_x']**2 + df['tunnel_diff_z']**2) * 12
+    df['late_break'] = df['plate_distance'] - df['tunnel_distance']
+
+    # Fill any remaining NaNs with 0 so LightGBM doesn't choke
     for col in ['tunnel_diff_x','tunnel_diff_z','tunnel_distance','time_after_tunnel',
                 'late_break','plate_distance']:
-        df[col] = 0.0
+        df[col] = df[col].fillna(0)
+
     X_tunnel = df[tunnel_features].values
     df['xRV_tunnel'] = tunnel_model.predict(X_tunnel)
 
@@ -183,6 +233,7 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
         norm = pitch_plus_norm.get(pt)
         if norm and norm['std'] > 0:
             z = (row['xRV_final'] - norm['mean']) / norm['std']
+            z = max(-4, min(4, z))  # clamp extreme outliers
             pitch_plus = round(100 - z * 10, 1)
         else:
             pitch_plus = None
