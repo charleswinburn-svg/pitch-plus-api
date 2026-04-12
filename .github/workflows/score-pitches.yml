@@ -1,0 +1,48 @@
+name: Score Pitches
+
+on:
+  schedule:
+    - cron: '0 11 * * *'  # 11:00 UTC = 7:00 AM ET, after update-data.yml
+  workflow_dispatch:
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pybaseball pandas numpy lightgbm pyarrow
+
+      - name: Fetch full-season Statcast parquet
+        run: |
+          mkdir -p tmp
+          python3 fetch_statcast.py --year 2026 --out tmp/pitch_xrv_2026.parquet
+
+      - name: Score pitches with 3-stage model
+        run: |
+          python3 score_pitches.py \
+            --input tmp/pitch_xrv_2026.parquet \
+            --models models \
+            --config models/final_model_config.json \
+            --output-dir tmp/output
+
+      - name: Build Pitch+ JSON for the React app
+        run: |
+          python3 build_pitch_plus.py \
+            --season-dir tmp/output/season \
+            --year 2026 \
+            --out public/pitch_plus_2026.json
+
+      - name: Commit Pitch+ data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/pitch_plus_*.json
+          git diff --staged --quiet || git commit -m "Auto-update Pitch+ $(date -u +%Y-%m-%d)"
+          git push
