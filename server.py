@@ -264,7 +264,12 @@ class PitchRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "models": len(location_models), "baselines": len(pitcher_baselines)}
+    return {
+        "status": "ok",
+        "models": len(location_models),
+        "baselines": len(pitcher_baselines),
+        "pitch_type_cats": PITCH_TYPE_CATS,  # debug: confirm which ordering is deployed
+    }
 
 
 @app.post("/score")
