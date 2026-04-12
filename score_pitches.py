@@ -65,20 +65,29 @@ def engineer_stuff_features(df):
     df['spin_efficiency'] = np.where(
         spin > 0, df['total_movement'] / (spin / 1000), np.nan)
 
-    # Fastball baseline per pitcher-season
-    fb_mask = df['pitch_type'].isin(['FF', 'SI', 'FC'])
-    fb = (df[fb_mask].groupby(['pitcher', 'season']).agg(
-        fb_velo=('release_speed', 'mean'),
-        fb_pfx_x=('pfx_x', 'mean'),
-        fb_pfx_z=('pfx_z', 'mean'),
-        fb_spin=('release_spin_rate', 'mean'),
-        fb_extension=('release_extension', 'mean'),
-        fb_rel_x=('release_pos_x', 'mean'),
-        fb_rel_z=('release_pos_z', 'mean'),
-        fb_vaa=('vaa', 'mean'),
-        fb_spin_axis=('spin_axis', 'mean'),
-    ).reset_index())
-    df = df.merge(fb, on=['pitcher', 'season'], how='left')
+    # Fastball baseline per pitcher — loaded from models/pitcher_baselines.json
+    # (trailing-window averages, built separately by build_pitcher_baselines.py).
+    # Falls back to league-average FF for cold-start pitchers.
+    baselines_path = Path(__file__).parent / 'models' / 'pitcher_baselines.json'
+    with open(baselines_path) as _f:
+        _baselines = json.load(_f)
+
+    for col in ['fb_velo','fb_pfx_x','fb_pfx_z','fb_spin','fb_extension','fb_vaa',
+                'fb_rel_x','fb_rel_z']:
+        df[col] = np.nan
+    for pid, group in df.groupby('pitcher'):
+        pid_s = str(int(pid)) if pd.notna(pid) else None
+        bl = _baselines.get(pid_s) if pid_s else None
+        if not bl: continue
+        mask = df['pitcher'] == pid
+        df.loc[mask, 'fb_velo'] = bl['fb_velo']
+        df.loc[mask, 'fb_pfx_x'] = bl['fb_pfx_x']
+        df.loc[mask, 'fb_pfx_z'] = bl['fb_pfx_z']
+        df.loc[mask, 'fb_spin'] = bl['fb_spin']
+        df.loc[mask, 'fb_extension'] = bl['fb_extension']
+        df.loc[mask, 'fb_vaa'] = bl['fb_vaa']
+        df.loc[mask, 'fb_rel_x'] = bl['fb_release_x']
+        df.loc[mask, 'fb_rel_z'] = bl['fb_release_z']
 
     df['delta_velo']          = df['release_speed'] - df['fb_velo']
     df['delta_pfx_x']         = df['pfx_x'] - df['fb_pfx_x']
@@ -90,6 +99,9 @@ def engineer_stuff_features(df):
     df['release_diff_x']      = df['release_pos_x'] - df['fb_rel_x']
     df['release_diff_z']      = df['release_pos_z'] - df['fb_rel_z']
     df['release_distance']    = np.sqrt(df['release_diff_x']**2 + df['release_diff_z']**2)
+    df = df.fillna({c: 0.0 for c in ['delta_velo','delta_pfx_x','delta_pfx_z','delta_spin',
+        'delta_extension','delta_vaa','release_diff_x','release_diff_z','release_distance',
+        'movement_separation']})
     df['pitch_type_cat']      = df['pitch_type'].astype('category')
     df['p_throws_cat']        = df['p_throws'].astype('category')
     return df
@@ -130,14 +142,21 @@ def engineer_tunnel_features(df):
     )
     df['time_after_tunnel'] = t_p - t_tun
 
-    fb_mask = df['pitch_type'].isin(['FF', 'SI', 'FC'])
-    fb_tun = (df[fb_mask].groupby(['pitcher', 'season']).agg(
-        fb_tunnel_x=('tunnel_x', 'mean'),
-        fb_tunnel_z=('tunnel_z', 'mean'),
-        fb_plate_x=('plate_x', 'mean'),
-        fb_plate_z=('plate_z', 'mean'),
-    ).reset_index())
-    df = df.merge(fb_tun, on=['pitcher', 'season'], how='left')
+    # FB tunnel anchors from baseline file (same source as stuff features)
+    _baselines_path = Path(__file__).parent / 'models' / 'pitcher_baselines.json'
+    with open(_baselines_path) as _f:
+        _baselines = json.load(_f)
+    for col in ['fb_tunnel_x','fb_tunnel_z','fb_plate_x','fb_plate_z']:
+        df[col] = np.nan
+    for pid, _ in df.groupby('pitcher'):
+        pid_s = str(int(pid)) if pd.notna(pid) else None
+        bl = _baselines.get(pid_s) if pid_s else None
+        if not bl: continue
+        mask = df['pitcher'] == pid
+        df.loc[mask, 'fb_tunnel_x'] = bl.get('fb_tunnel_x', np.nan)
+        df.loc[mask, 'fb_tunnel_z'] = bl.get('fb_tunnel_z', np.nan)
+        df.loc[mask, 'fb_plate_x'] = bl.get('fb_plate_x', np.nan)
+        df.loc[mask, 'fb_plate_z'] = bl.get('fb_plate_z', np.nan)
 
     df['tunnel_diff_x']   = df['tunnel_x'] - df['fb_tunnel_x']
     df['tunnel_diff_z']   = df['tunnel_z'] - df['fb_tunnel_z']
@@ -147,6 +166,8 @@ def engineer_tunnel_features(df):
         (df['plate_z'] - df['fb_plate_z'])**2
     ) * 12
     df['late_break'] = df['plate_distance'] - df['tunnel_distance']
+    df = df.fillna({c: 0.0 for c in ['tunnel_diff_x','tunnel_diff_z','tunnel_distance',
+                                       'plate_distance','late_break']})
     return df
 
 

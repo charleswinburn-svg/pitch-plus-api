@@ -54,7 +54,7 @@ with open(MODELS_DIR / "pitch_plus_norm.json") as f:
 
 print(f"Loaded {len(location_models)} location models, {len(pitcher_baselines)} baselines")
 
-PITCH_TYPE_CATS = ['FF','SI','FC','SL','ST','CU','KC','SV','CH','FS']
+PITCH_TYPE_CATS = ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
 THROWS_CATS = ['L','R']
 STAND_CATS = ['L','R']
 
