@@ -101,6 +101,12 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     if df.empty:
         return []
 
+    # Alias rare pitch types to their closest equivalent for model scoring
+    # FO (forkball) → FS (splitter): same grip family, same model treatment
+    PITCH_ALIASES = {'FO': 'FS'}
+    df['pitch_type_display'] = df['pitch_type'].copy()  # preserve original for output
+    df['pitch_type'] = df['pitch_type'].replace(PITCH_ALIASES)
+
     # Cast to float64
     for c in ['release_speed','pfx_x','pfx_z','release_spin_rate','spin_axis',
               'release_extension','release_pos_x','release_pos_z','vx0','vy0','vz0',
@@ -229,7 +235,8 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     # ── Convert to Pitch+ (100 = avg, ±10 per std, higher = better) ──
     out = []
     for i, row in df.iterrows():
-        pt = row['pitch_type']
+        pt = row['pitch_type']  # aliased (FO→FS) for norm lookup
+        pt_display = row['pitch_type_display']  # original for output
         norm = pitch_plus_norm.get(pt)
         if norm and norm['std'] > 0:
             z = (row['xRV_final'] - norm['mean']) / norm['std']
@@ -239,7 +246,7 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
             pitch_plus = None
         out.append({
             "index": int(i),
-            "pitch_type": pt,
+            "pitch_type": pt_display,
             "pitch_plus": pitch_plus,
             "xRV_stuff": float(row['xRV_stuff']),
             "xRV_location": float(row['xRV_location']),
