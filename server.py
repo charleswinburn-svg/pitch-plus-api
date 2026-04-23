@@ -54,7 +54,7 @@ with open(MODELS_DIR / "pitch_plus_norm.json") as f:
 
 print(f"Loaded {len(location_models)} location models, {len(pitcher_baselines)} baselines")
 
-PITCH_TYPE_CATS = ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
+PITCH_TYPE_CATS = ['FF','SI','FC','SL','ST','CU','KC','SV','CH','FS']
 THROWS_CATS = ['L','R']
 STAND_CATS = ['L','R']
 
@@ -100,12 +100,6 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     df = pd.DataFrame(rows)
     if df.empty:
         return []
-
-    # Alias rare pitch types to their closest equivalent for model scoring
-    # FO (forkball) → FS (splitter): same grip family, same model treatment
-    PITCH_ALIASES = {'FO': 'FS'}
-    df['pitch_type_display'] = df['pitch_type'].copy()  # preserve original for output
-    df['pitch_type'] = df['pitch_type'].replace(PITCH_ALIASES)
 
     # Cast to float64
     for c in ['release_speed','pfx_x','pfx_z','release_spin_rate','spin_axis',
@@ -169,60 +163,10 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
             X = df.loc[mask, location_features].values
             df.loc[mask, 'xRV_location'] = model.predict(X)
 
-    # ── Tunnel features: real trajectory math ──
-    PLATE_Y = 17.0 / 12.0
-    y_tun = PLATE_Y + 23.0
-    y0 = 50.0
-
-    a_ = 0.5 * df['ay'].values
-    b_ = df['vy0'].values
-    c_ = y0 - y_tun
-    with np.errstate(invalid='ignore', divide='ignore'):
-        disc = b_**2 - 4 * a_ * c_
-        t_tun = np.where(disc >= 0,
-                         (-b_ - np.sqrt(np.maximum(disc, 0))) / (2 * a_),
-                         np.nan)
-        t_tun = np.where((t_tun > 0) & (t_tun < 0.5), t_tun, np.nan)
-
-    # Trajectory at tunnel point — needs vx0 and ax which may be missing
-    # If missing, fall back to release_pos (no x deflection)
-    vx0 = df['vx0'].fillna(0).values if 'vx0' in df.columns else np.zeros(len(df))
-    ax  = df['ax'].fillna(0).values if 'ax' in df.columns else np.zeros(len(df))
-    df['tunnel_x'] = (df['release_pos_x'].values + vx0 * t_tun + 0.5 * ax * t_tun**2)
-    df['tunnel_z'] = (df['release_pos_z'].values + df['vz0'].values * t_tun
-                      + 0.5 * df['az'].values * t_tun**2)
-
-    c_p = y0 - PLATE_Y
-    disc_p = b_**2 - 4 * a_ * c_p
-    with np.errstate(invalid='ignore', divide='ignore'):
-        t_p = np.where(disc_p >= 0,
-                       (-b_ - np.sqrt(np.maximum(disc_p, 0))) / (2 * a_),
-                       np.nan)
-    df['time_after_tunnel'] = t_p - t_tun
-
-    # Diffs vs pitcher's fastball tunnel anchor (from baselines)
-    df['tunnel_diff_x'] = 0.0
-    df['tunnel_diff_z'] = 0.0
-    df['plate_distance'] = 0.0
-    for i, row in df.iterrows():
-        pid = str(int(row['pitcher'])) if pd.notna(row.get('pitcher')) else None
-        bl = pitcher_baselines.get(pid) if pid else None
-        if bl and 'fb_tunnel_x' in bl:
-            df.at[i,'tunnel_diff_x'] = (row['tunnel_x'] - bl['fb_tunnel_x']) if pd.notna(row['tunnel_x']) else 0.0
-            df.at[i,'tunnel_diff_z'] = (row['tunnel_z'] - bl['fb_tunnel_z']) if pd.notna(row['tunnel_z']) else 0.0
-            df.at[i,'plate_distance'] = np.sqrt(
-                (row['plate_x'] - bl['fb_plate_x'])**2 +
-                (row['plate_z'] - bl['fb_plate_z'])**2
-            ) * 12
-
-    df['tunnel_distance'] = np.sqrt(df['tunnel_diff_x']**2 + df['tunnel_diff_z']**2) * 12
-    df['late_break'] = df['plate_distance'] - df['tunnel_distance']
-
-    # Fill any remaining NaNs with 0 so LightGBM doesn't choke
+    # ── Tunnel features (simplified — defaults to 0 for live single pitches) ──
     for col in ['tunnel_diff_x','tunnel_diff_z','tunnel_distance','time_after_tunnel',
                 'late_break','plate_distance']:
-        df[col] = df[col].fillna(0)
-
+        df[col] = 0.0
     X_tunnel = df[tunnel_features].values
     df['xRV_tunnel'] = tunnel_model.predict(X_tunnel)
 
@@ -235,18 +179,16 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     # ── Convert to Pitch+ (100 = avg, ±10 per std, higher = better) ──
     out = []
     for i, row in df.iterrows():
-        pt = row['pitch_type']  # aliased (FO→FS) for norm lookup
-        pt_display = row['pitch_type_display']  # original for output
+        pt = row['pitch_type']
         norm = pitch_plus_norm.get(pt)
         if norm and norm['std'] > 0:
             z = (row['xRV_final'] - norm['mean']) / norm['std']
-            z = max(-4, min(4, z))  # clamp extreme outliers
             pitch_plus = round(100 - z * 10, 1)
         else:
             pitch_plus = None
         out.append({
             "index": int(i),
-            "pitch_type": pt_display,
+            "pitch_type": pt,
             "pitch_plus": pitch_plus,
             "xRV_stuff": float(row['xRV_stuff']),
             "xRV_location": float(row['xRV_location']),
@@ -271,12 +213,7 @@ class PitchRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok",
-        "models": len(location_models),
-        "baselines": len(pitcher_baselines),
-        "pitch_type_cats": PITCH_TYPE_CATS,  # debug: confirm which ordering is deployed
-    }
+    return {"status": "ok", "models": len(location_models), "baselines": len(pitcher_baselines)}
 
 
 @app.post("/score")
