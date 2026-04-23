@@ -148,8 +148,8 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     df['stand_cat'] = pd.Categorical(df['stand'], categories=STAND_CATS)
     df['same_side'] = (df['p_throws'] == df['stand']).astype(int)
 
-    # ── Stuff prediction ──
-    X_stuff = df[stuff_features].values
+    # ── Stuff prediction (pass DataFrame to preserve categorical dtypes) ──
+    X_stuff = df[stuff_features]
     df['xRV_stuff'] = stuff_model.predict(X_stuff)
 
     # ── Location features ──
@@ -167,7 +167,7 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     for pt, model in location_models.items():
         mask = df['pitch_type'] == pt
         if mask.sum() > 0:
-            X = df.loc[mask, location_features].values
+            X = df.loc[mask, location_features]
             df.loc[mask, 'xRV_location'] = model.predict(X)
 
     # ── Tunnel features: real trajectory math ──
@@ -224,7 +224,7 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
                 'late_break','plate_distance']:
         df[col] = df[col].fillna(0)
 
-    X_tunnel = df[tunnel_features].values
+    X_tunnel = df[tunnel_features]
     df['xRV_tunnel'] = tunnel_model.predict(X_tunnel)
 
     # ── Final ridge combination ──
