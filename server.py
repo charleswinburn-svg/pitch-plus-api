@@ -238,17 +238,21 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     for i, row in df.iterrows():
         pt = row['pitch_type']  # aliased (FO→FS) for norm lookup
         pt_display = row['pitch_type_display']  # original for output
-        norm = pitch_plus_norm.get(pt)
-        if norm and norm['std'] > 0:
-            z = (row['xRV_final'] - norm['mean']) / norm['std']
-            z = max(-4, min(4, z))  # clamp extreme outliers
-            pitch_plus = round(100 - z * 10, 1)
-        else:
-            pitch_plus = None
+        n = pitch_plus_norm.get(pt)
+
+        def _grade(val, mean_key, std_key):
+            if not n or std_key not in n or n[std_key] <= 0:
+                return None
+            z = max(-4, min(4, (val - n[mean_key]) / n[std_key]))
+            return round(100 - z * 10, 1)
+
         out.append({
             "index": int(i),
             "pitch_type": pt_display,
-            "pitch_plus": pitch_plus,
+            "stuff_plus": _grade(row['xRV_stuff'], 'stuff_mean', 'stuff_std'),
+            "loc_plus": _grade(row['xRV_location'], 'loc_mean', 'loc_std'),
+            "tunnel_plus": _grade(row['xRV_tunnel'], 'tun_mean', 'tun_std'),
+            "pitch_plus": _grade(row['xRV_final'], 'mean', 'std'),
             "xRV_stuff": float(row['xRV_stuff']),
             "xRV_location": float(row['xRV_location']),
             "xRV_tunnel": float(row['xRV_tunnel']),
