@@ -50,7 +50,17 @@ with open(MODELS_DIR / "pitcher_baselines.json") as f:
 
 # Per-pitch-type Pitch+ league mean/std (computed from 2025 season aggregates)
 with open(MODELS_DIR / "pitch_plus_norm.json") as f:
-    pitch_plus_norm = json.load(f)  # {pt: {mean, std}}
+    pitch_plus_norm = json.load(f)  # {pt: {mean, std, stuff_mean, stuff_std, ...}}
+
+# AAA norms (optional — falls back to MLB if not present)
+aaa_norm_path = MODELS_DIR / "pitch_plus_norm_aaa.json"
+if aaa_norm_path.exists():
+    with open(aaa_norm_path) as f:
+        pitch_plus_norm_aaa = json.load(f)
+    print(f"Loaded AAA norms ({len(pitch_plus_norm_aaa)} pitch types)")
+else:
+    pitch_plus_norm_aaa = None
+    print("No AAA norms found — AAA pitches will use MLB norms")
 
 print(f"Loaded {len(location_models)} location models, {len(pitcher_baselines)} baselines")
 
@@ -95,8 +105,10 @@ def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
     }
 
 
-def engineer_and_score(rows: list[dict]) -> list[dict]:
+def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
     """Run feature engineering + 3-stage model on a list of mapped pitches."""
+    if norm_dict is None:
+        norm_dict = pitch_plus_norm
     df = pd.DataFrame(rows)
     if df.empty:
         return []
@@ -238,7 +250,7 @@ def engineer_and_score(rows: list[dict]) -> list[dict]:
     for i, row in df.iterrows():
         pt = row['pitch_type']  # aliased (FO→FS) for norm lookup
         pt_display = row['pitch_type_display']  # original for output
-        n = pitch_plus_norm.get(pt)
+        n = norm_dict.get(pt)
 
         def _grade(val, mean_key, std_key):
             if not n or std_key not in n or n[std_key] <= 0:
@@ -272,6 +284,7 @@ app.add_middleware(
 
 class PitchRequest(BaseModel):
     pitches: list[dict]
+    is_aaa: bool = False
 
 
 @app.get("/health")
@@ -280,7 +293,8 @@ def health():
         "status": "ok",
         "models": len(location_models),
         "baselines": len(pitcher_baselines),
-        "pitch_type_cats": PITCH_TYPE_CATS,  # debug: confirm which ordering is deployed
+        "has_aaa_norms": pitch_plus_norm_aaa is not None,
+        "pitch_type_cats": PITCH_TYPE_CATS,
     }
 
 
@@ -295,5 +309,7 @@ def score(req: PitchRequest):
             rows.append(mapped)
     if not rows:
         return {"scores": []}
-    scored = engineer_and_score(rows)
+    # Use AAA norms when requested and available
+    norm = (pitch_plus_norm_aaa if req.is_aaa and pitch_plus_norm_aaa else pitch_plus_norm)
+    scored = engineer_and_score(rows, norm)
     return {"scores": scored}
