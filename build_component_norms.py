@@ -21,6 +21,16 @@ def main():
     p.add_argument("--config", default="models/final_model_config.json")
     p.add_argument("--norm", default="models/pitch_plus_norm.json")
     p.add_argument("--chunk-rows", type=int, default=50_000)
+    p.add_argument("--global-stuff", action="store_true",
+                   help="Use one global mean/std for Stuff+ (cross-pitch-type comparison)")
+    p.add_argument("--global-loc", action="store_true",
+                   help="Use one global mean/std for Loc+ (rarely wanted)")
+    p.add_argument("--global-tun", action="store_true",
+                   help="Use one global mean/std for Tun+")
+    p.add_argument("--global-pitch", action="store_true",
+                   help="Use one global mean/std for Pitch+ overall")
+    p.add_argument("--global-all", action="store_true",
+                   help="Shortcut: enable all four global flags")
     args = p.parse_args()
 
     sys.path.insert(0, ".")
@@ -82,18 +92,60 @@ def main():
     game_agg = final_agg[final_agg['n'] >= 5].copy()
     print(f"  {len(game_agg):,} game-level samples (n>=5 per type)")
 
+    if args.global_all:
+        args.global_stuff = args.global_loc = args.global_tun = args.global_pitch = True
+
+    # Pre-compute global stats (used if any --global-X flag is set)
+    G = {
+        'final_mean': float(game_agg['final'].median()),
+        'final_std': float(game_agg['final'].std()),
+        'stuff_mean': float(game_agg['stuff'].median()),
+        'stuff_std': float(game_agg['stuff'].std()),
+        'loc_mean': float(game_agg['loc'].median()),
+        'loc_std': float(game_agg['loc'].std()),
+        'tun_mean': float(game_agg['tun'].median()),
+        'tun_std': float(game_agg['tun'].std()),
+    }
+    print(f"\nGlobal (cross-type) stats:")
+    print(f"  Pitch+:  mean={G['final_mean']:.5f}, std={G['final_std']:.5f}")
+    print(f"  Stuff+:  mean={G['stuff_mean']:.5f}, std={G['stuff_std']:.5f}")
+    print(f"  Loc+:    mean={G['loc_mean']:.5f}, std={G['loc_std']:.5f}")
+    print(f"  Tun+:    mean={G['tun_mean']:.5f}, std={G['tun_std']:.5f}\n")
+
+    print(f"Norm scope:")
+    print(f"  Pitch+:  {'GLOBAL' if args.global_pitch else 'per-type'}")
+    print(f"  Stuff+:  {'GLOBAL' if args.global_stuff else 'per-type'}")
+    print(f"  Loc+:    {'GLOBAL' if args.global_loc else 'per-type'}")
+    print(f"  Tun+:    {'GLOBAL' if args.global_tun else 'per-type'}")
+
     norm = json.load(open(args.norm))
     for pt, sub in game_agg.groupby('pitch_type'):
         if pt not in norm or len(sub) < 100:
             continue
-        norm[pt]['mean'] = float(sub['final'].median())
-        norm[pt]['std'] = float(sub['final'].std())
-        norm[pt]['stuff_mean'] = float(sub['stuff'].median())
-        norm[pt]['stuff_std'] = float(sub['stuff'].std())
-        norm[pt]['loc_mean'] = float(sub['loc'].median())
-        norm[pt]['loc_std'] = float(sub['loc'].std())
-        norm[pt]['tun_mean'] = float(sub['tun'].median())
-        norm[pt]['tun_std'] = float(sub['tun'].std())
+        # Pitch+ overall
+        if args.global_pitch:
+            norm[pt]['mean'] = G['final_mean']; norm[pt]['std'] = G['final_std']
+        else:
+            norm[pt]['mean'] = float(sub['final'].median())
+            norm[pt]['std'] = float(sub['final'].std())
+        # Stuff
+        if args.global_stuff:
+            norm[pt]['stuff_mean'] = G['stuff_mean']; norm[pt]['stuff_std'] = G['stuff_std']
+        else:
+            norm[pt]['stuff_mean'] = float(sub['stuff'].median())
+            norm[pt]['stuff_std'] = float(sub['stuff'].std())
+        # Location
+        if args.global_loc:
+            norm[pt]['loc_mean'] = G['loc_mean']; norm[pt]['loc_std'] = G['loc_std']
+        else:
+            norm[pt]['loc_mean'] = float(sub['loc'].median())
+            norm[pt]['loc_std'] = float(sub['loc'].std())
+        # Tunnel
+        if args.global_tun:
+            norm[pt]['tun_mean'] = G['tun_mean']; norm[pt]['tun_std'] = G['tun_std']
+        else:
+            norm[pt]['tun_mean'] = float(sub['tun'].median())
+            norm[pt]['tun_std'] = float(sub['tun'].std())
 
     with open(args.norm, "w") as f:
         json.dump(norm, f, indent=2)
