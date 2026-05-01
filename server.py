@@ -48,6 +48,40 @@ intercept = config["intercept"]
 with open(MODELS_DIR / "pitcher_baselines.json") as f:
     pitcher_baselines = json.load(f)
 
+# Arm angle baselines (for new stuff model)
+arm_angle_path = MODELS_DIR / "pitcher_arm_angles.json"
+if arm_angle_path.exists():
+    with open(arm_angle_path) as f:
+        pitcher_arm_angles = json.load(f)
+    print(f"Loaded {len(pitcher_arm_angles)} MLB pitcher arm angle baselines")
+else:
+    pitcher_arm_angles = {}
+    print("No pitcher_arm_angles.json — arm angle features will default to 0")
+
+# AAA arm angle baselines (fallback for prospects/call-ups not yet in MLB data)
+aaa_arm_angle_path = MODELS_DIR / "pitcher_arm_angles_aaa.json"
+if aaa_arm_angle_path.exists():
+    with open(aaa_arm_angle_path) as f:
+        aaa_arm_angles = json.load(f)
+    # MLB takes precedence — only fill in AAA pitchers not already in MLB data
+    added = 0
+    for pid, data in aaa_arm_angles.items():
+        if pid not in pitcher_arm_angles:
+            pitcher_arm_angles[pid] = data
+            added += 1
+    print(f"Loaded {len(aaa_arm_angles)} AAA pitcher arm angle baselines ({added} new prospects added)")
+
+# Compute league-average arm angle stats (used as fallback for pitchers not in baselines)
+if pitcher_arm_angles:
+    _aa_vals = [v['arm_angle'] for v in pitcher_arm_angles.values() if 'arm_angle' in v]
+    _aa_std_vals = [v['arm_angle_std'] for v in pitcher_arm_angles.values() if 'arm_angle_std' in v]
+    LEAGUE_AVG_ARM_ANGLE = float(np.median(_aa_vals)) if _aa_vals else 45.0
+    LEAGUE_AVG_ARM_ANGLE_STD = float(np.median(_aa_std_vals)) if _aa_std_vals else 3.0
+    print(f"League-average arm angle: {LEAGUE_AVG_ARM_ANGLE:.1f}° (std fallback: {LEAGUE_AVG_ARM_ANGLE_STD:.2f}°)")
+else:
+    LEAGUE_AVG_ARM_ANGLE = 45.0  # typical 3/4 delivery
+    LEAGUE_AVG_ARM_ANGLE_STD = 3.0
+
 # Per-pitch-type Pitch+ league mean/std (computed from 2025 season aggregates)
 with open(MODELS_DIR / "pitch_plus_norm.json") as f:
     pitch_plus_norm = json.load(f)  # {pt: {mean, std, stuff_mean, stuff_std, ...}}
@@ -159,6 +193,29 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
     df['p_throws_cat'] = pd.Categorical(df['p_throws'], categories=THROWS_CATS)
     df['stand_cat'] = pd.Categorical(df['stand'], categories=STAND_CATS)
     df['same_side'] = (df['p_throws'] == df['stand']).astype(int)
+
+    # ── Arm angle features ──
+    # If pitcher has a baseline → use their actual values + compute pfx deviations from their slot.
+    # If not → use league-average arm_angle/std and zero out deviations (neutral signal).
+    # This way the 5 AA features behave neutrally for unknown pitchers and the other 20
+    # features (velo, movement, spin, release, deltas) carry the prediction.
+    df['arm_angle'] = LEAGUE_AVG_ARM_ANGLE
+    df['arm_angle_std'] = LEAGUE_AVG_ARM_ANGLE_STD
+    df['arm_angle_dev'] = 0.0  # always 0 for live (no per-pitch arm angle from API)
+    df['pfx_x_dev_from_slot'] = 0.0
+    df['pfx_z_dev_from_slot'] = 0.0
+
+    for pid, group in df.groupby('pitcher'):
+        pid_s = str(int(pid)) if pd.notna(pid) else None
+        aa = pitcher_arm_angles.get(pid_s) if pid_s else None
+        if not aa:
+            continue  # leave league-average defaults
+        mask = df['pitcher'] == pid
+        df.loc[mask, 'arm_angle'] = aa['arm_angle']
+        df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
+        # pfx deviation from slot = actual pfx minus expected pfx for this arm slot
+        df.loc[mask, 'pfx_x_dev_from_slot'] = df.loc[mask, 'pfx_x'] - aa['pfx_x_slot']
+        df.loc[mask, 'pfx_z_dev_from_slot'] = df.loc[mask, 'pfx_z'] - aa['pfx_z_slot']
 
     # ── Stuff prediction (pass DataFrame to preserve categorical dtypes) ──
     X_stuff = df[stuff_features]
@@ -293,6 +350,7 @@ def health():
         "status": "ok",
         "models": len(location_models),
         "baselines": len(pitcher_baselines),
+        "arm_angles": len(pitcher_arm_angles),
         "has_aaa_norms": pitch_plus_norm_aaa is not None,
         "pitch_type_cats": PITCH_TYPE_CATS,
     }

@@ -104,6 +104,60 @@ def engineer_stuff_features(df):
         'movement_separation']})
     df['pitch_type_cat']      = df['pitch_type'].astype('category')
     df['p_throws_cat']        = df['p_throws'].astype('category')
+
+    # ── Arm angle features ──
+    # If the parquet has arm_angle (from Statcast), use it directly
+    if 'arm_angle' in df.columns:
+        df['arm_angle'] = pd.to_numeric(df['arm_angle'], errors='coerce')
+        # Per-pitcher stats
+        aa_stats = df.groupby('pitcher')['arm_angle'].agg(['mean', 'std']).reset_index()
+        aa_stats.columns = ['pitcher', '_aa_mean', '_aa_std']
+        aa_stats['_aa_std'] = aa_stats['_aa_std'].fillna(0)
+        df = df.merge(aa_stats, on='pitcher', how='left')
+        df['arm_angle_std'] = df['_aa_std'].fillna(0)
+        df['arm_angle_dev'] = (df['arm_angle'] - df['_aa_mean']).fillna(0)
+        df['arm_angle'] = df['arm_angle'].fillna(df['_aa_mean']).fillna(0)
+        # pfx deviation from slot: actual pfx minus pitcher's mean pfx
+        pfx_stats = df.groupby('pitcher')[['pfx_x', 'pfx_z']].mean().reset_index()
+        pfx_stats.columns = ['pitcher', '_pfx_x_slot', '_pfx_z_slot']
+        df = df.merge(pfx_stats, on='pitcher', how='left')
+        df['pfx_x_dev_from_slot'] = (df['pfx_x'] - df['_pfx_x_slot']).fillna(0)
+        df['pfx_z_dev_from_slot'] = (df['pfx_z'] - df['_pfx_z_slot']).fillna(0)
+        df = df.drop(columns=['_aa_mean', '_aa_std', '_pfx_x_slot', '_pfx_z_slot'], errors='ignore')
+    else:
+        # Fall back to pre-computed baselines
+        arm_angles_path = Path(__file__).parent / 'models' / 'pitcher_arm_angles.json'
+        _arm_angles = {}
+        if arm_angles_path.exists():
+            with open(arm_angles_path) as _f:
+                _arm_angles = json.load(_f)
+
+        # League averages from baselines (neutral fallback for pitchers not in file)
+        if _arm_angles:
+            _aa_vals = [v['arm_angle'] for v in _arm_angles.values() if 'arm_angle' in v]
+            _aa_std_vals = [v['arm_angle_std'] for v in _arm_angles.values() if 'arm_angle_std' in v]
+            _league_aa = float(np.median(_aa_vals)) if _aa_vals else 45.0
+            _league_aa_std = float(np.median(_aa_std_vals)) if _aa_std_vals else 3.0
+        else:
+            _league_aa, _league_aa_std = 45.0, 3.0
+
+        df['arm_angle'] = _league_aa
+        df['arm_angle_std'] = _league_aa_std
+        df['arm_angle_dev'] = 0.0
+        df['pfx_x_dev_from_slot'] = 0.0
+        df['pfx_z_dev_from_slot'] = 0.0
+
+        for pid, group in df.groupby('pitcher'):
+            pid_s = str(int(pid)) if pd.notna(pid) else None
+            aa = _arm_angles.get(pid_s) if pid_s else None
+            if not aa:
+                continue  # keep league-average defaults
+            mask = df['pitcher'] == pid
+            df.loc[mask, 'arm_angle'] = aa['arm_angle']
+            df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
+            df.loc[mask, 'pfx_x_dev_from_slot'] = df.loc[mask, 'pfx_x'] - aa['pfx_x_slot']
+            df.loc[mask, 'pfx_z_dev_from_slot'] = df.loc[mask, 'pfx_z'] - aa['pfx_z_slot']
+
     return df
 
 
