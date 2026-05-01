@@ -71,6 +71,17 @@ if aaa_arm_angle_path.exists():
             added += 1
     print(f"Loaded {len(aaa_arm_angles)} AAA pitcher arm angle baselines ({added} new prospects added)")
 
+# Slot regression: per-pitch-type linear coefficients mapping arm_angle → expected pfx_x/z.
+# Used to compute pfx_*_dev_from_slot for any pitcher (matches training-time logic).
+slot_regression_path = MODELS_DIR / "slot_regression.json"
+if slot_regression_path.exists():
+    with open(slot_regression_path) as f:
+        slot_regression = json.load(f)
+    print(f"Loaded slot regression for {len(slot_regression)} pitch types")
+else:
+    slot_regression = {}
+    print("No slot_regression.json — pfx_*_dev_from_slot will use pitcher mean fallback")
+
 # Per-pitch-type Pitch+ league mean/std (computed from 2025 season aggregates)
 with open(MODELS_DIR / "pitch_plus_norm.json") as f:
     pitch_plus_norm = json.load(f)  # {pt: {mean, std, stuff_mean, stuff_std, ...}}
@@ -184,10 +195,11 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
     df['same_side'] = (df['p_throws'] == df['stand']).astype(int)
 
     # ── Arm angle features ──
-    # If pitcher has a baseline → use their actual values + compute pfx deviations.
-    # If not → set all 5 AA features to NaN so LightGBM treats them as missing
-    # and routes through learned default branches (effectively neutralizing those splits).
-    # The other 20 non-AA features carry the prediction.
+    # arm_angle, arm_angle_std: per-pitcher rolling 3-start baselines (from pitcher_arm_angles.json)
+    # arm_angle_dev: always 0 for live (MLB Stats API has no per-pitch arm_angle)
+    # pfx_*_dev_from_slot: actual pfx minus expected pfx from training-time linear regression
+    #   on (arm_angle, pfx) per pitch type. Works for ANY pitcher with a known arm_angle,
+    #   even debuts — just needs slot_regression.json + pitcher's arm angle baseline.
     df['arm_angle'] = np.nan
     df['arm_angle_std'] = np.nan
     df['arm_angle_dev'] = np.nan
@@ -198,13 +210,24 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
         pid_s = str(int(pid)) if pd.notna(pid) else None
         aa = pitcher_arm_angles.get(pid_s) if pid_s else None
         if not aa:
-            continue  # leave NaN defaults — LightGBM handles missing
+            continue  # leave NaN — LightGBM handles missing via learned default branches
         mask = df['pitcher'] == pid
         df.loc[mask, 'arm_angle'] = aa['arm_angle']
         df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
-        df.loc[mask, 'arm_angle_dev'] = 0.0  # no per-pitch AA from MLB Stats API → assume mean
-        df.loc[mask, 'pfx_x_dev_from_slot'] = df.loc[mask, 'pfx_x'] - aa['pfx_x_slot']
-        df.loc[mask, 'pfx_z_dev_from_slot'] = df.loc[mask, 'pfx_z'] - aa['pfx_z_slot']
+        df.loc[mask, 'arm_angle_dev'] = 0.0
+
+    # Slot regression: expected pfx given arm_angle, per pitch type
+    # actual_pfx - (slope * arm_angle + intercept)
+    if slot_regression:
+        for pt, coef in slot_regression.items():
+            mask = (df['pitch_type'] == pt) & df['arm_angle'].notna()
+            if mask.sum() == 0:
+                continue
+            arm = df.loc[mask, 'arm_angle']
+            expected_x = coef['slope_x'] * arm + coef['intercept_x']
+            expected_z = coef['slope_z'] * arm + coef['intercept_z']
+            df.loc[mask, 'pfx_x_dev_from_slot'] = (df.loc[mask, 'pfx_x'] - expected_x).astype(float)
+            df.loc[mask, 'pfx_z_dev_from_slot'] = (df.loc[mask, 'pfx_z'] - expected_z).astype(float)
 
     # ── Stuff prediction (pass DataFrame to preserve categorical dtypes) ──
     X_stuff = df[stuff_features]

@@ -105,52 +105,56 @@ def engineer_stuff_features(df):
     df['pitch_type_cat']      = df['pitch_type'].astype('category')
     df['p_throws_cat']        = df['p_throws'].astype('category')
 
-    # ── Arm angle features ──
-    # If the parquet has arm_angle (from Statcast), use it directly
-    if 'arm_angle' in df.columns:
-        df['arm_angle'] = pd.to_numeric(df['arm_angle'], errors='coerce')
-        # Per-pitcher stats
-        aa_stats = df.groupby('pitcher')['arm_angle'].agg(['mean', 'std']).reset_index()
-        aa_stats.columns = ['pitcher', '_aa_mean', '_aa_std']
-        aa_stats['_aa_std'] = aa_stats['_aa_std'].fillna(0)
-        df = df.merge(aa_stats, on='pitcher', how='left')
-        df['arm_angle_std'] = df['_aa_std'].fillna(0)
-        df['arm_angle_dev'] = (df['arm_angle'] - df['_aa_mean']).fillna(0)
-        df['arm_angle'] = df['arm_angle'].fillna(df['_aa_mean']).fillna(0)
-        # pfx deviation from slot: actual pfx minus pitcher's mean pfx
-        pfx_stats = df.groupby('pitcher')[['pfx_x', 'pfx_z']].mean().reset_index()
-        pfx_stats.columns = ['pitcher', '_pfx_x_slot', '_pfx_z_slot']
-        df = df.merge(pfx_stats, on='pitcher', how='left')
-        df['pfx_x_dev_from_slot'] = (df['pfx_x'] - df['_pfx_x_slot']).fillna(0)
-        df['pfx_z_dev_from_slot'] = (df['pfx_z'] - df['_pfx_z_slot']).fillna(0)
-        df = df.drop(columns=['_aa_mean', '_aa_std', '_pfx_x_slot', '_pfx_z_slot'], errors='ignore')
-    else:
-        # Fall back to pre-computed baselines
-        arm_angles_path = Path(__file__).parent / 'models' / 'pitcher_arm_angles.json'
-        _arm_angles = {}
-        if arm_angles_path.exists():
-            with open(arm_angles_path) as _f:
-                _arm_angles = json.load(_f)
+    # ── Arm angle features (matches training notebook logic) ──
+    # arm_angle, arm_angle_std: per-pitcher rolling baseline (or per-pitch from parquet if Statcast)
+    # arm_angle_dev: actual_arm_angle - pitcher_mean (per-pitch in batch, 0 in live API)
+    # pfx_*_dev_from_slot: actual pfx - expected pfx from per-pitch-type linear regression on arm_angle
+    arm_angles_path = Path(__file__).parent / 'models' / 'pitcher_arm_angles.json'
+    slot_reg_path = Path(__file__).parent / 'models' / 'slot_regression.json'
+    _arm_angles = {}
+    _slot_reg = {}
+    if arm_angles_path.exists():
+        with open(arm_angles_path) as _f:
+            _arm_angles = json.load(_f)
+    if slot_reg_path.exists():
+        with open(slot_reg_path) as _f:
+            _slot_reg = json.load(_f)
 
-        # NaN defaults — LightGBM treats missing values via learned default branches,
-        # effectively neutralizing the 5 AA features. The other 20 features carry the prediction.
-        df['arm_angle'] = np.nan
-        df['arm_angle_std'] = np.nan
-        df['arm_angle_dev'] = np.nan
-        df['pfx_x_dev_from_slot'] = np.nan
-        df['pfx_z_dev_from_slot'] = np.nan
+    # Initialize all 5 features to NaN — LightGBM handles missing
+    df['arm_angle'] = np.nan
+    df['arm_angle_std'] = np.nan
+    df['arm_angle_dev'] = np.nan
+    df['pfx_x_dev_from_slot'] = np.nan
+    df['pfx_z_dev_from_slot'] = np.nan
 
-        for pid, group in df.groupby('pitcher'):
-            pid_s = str(int(pid)) if pd.notna(pid) else None
-            aa = _arm_angles.get(pid_s) if pid_s else None
-            if not aa:
-                continue  # keep NaN defaults
-            mask = df['pitcher'] == pid
-            df.loc[mask, 'arm_angle'] = aa['arm_angle']
-            df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
+    has_per_pitch_aa = 'arm_angle' in df.columns and pd.to_numeric(df['arm_angle'], errors='coerce').notna().any()
+    if has_per_pitch_aa:
+        per_pitch_aa = pd.to_numeric(df['arm_angle'], errors='coerce')
+
+    for pid, group in df.groupby('pitcher'):
+        pid_s = str(int(pid)) if pd.notna(pid) else None
+        aa = _arm_angles.get(pid_s) if pid_s else None
+        if not aa:
+            continue  # keep NaN — LightGBM ignores AA features for unknown pitchers
+        mask = df['pitcher'] == pid
+        df.loc[mask, 'arm_angle'] = aa['arm_angle']
+        df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
+        if has_per_pitch_aa:
+            df.loc[mask, 'arm_angle_dev'] = (per_pitch_aa[mask] - aa['arm_angle']).fillna(0)
+        else:
             df.loc[mask, 'arm_angle_dev'] = 0.0
-            df.loc[mask, 'pfx_x_dev_from_slot'] = df.loc[mask, 'pfx_x'] - aa['pfx_x_slot']
-            df.loc[mask, 'pfx_z_dev_from_slot'] = df.loc[mask, 'pfx_z'] - aa['pfx_z_slot']
+
+    # Slot regression: expected pfx given arm_angle, per pitch type (matches training)
+    if _slot_reg:
+        for pt, coef in _slot_reg.items():
+            mask = (df['pitch_type'] == pt) & df['arm_angle'].notna()
+            if mask.sum() == 0:
+                continue
+            arm = df.loc[mask, 'arm_angle']
+            expected_x = coef['slope_x'] * arm + coef['intercept_x']
+            expected_z = coef['slope_z'] * arm + coef['intercept_z']
+            df.loc[mask, 'pfx_x_dev_from_slot'] = (df.loc[mask, 'pfx_x'] - expected_x).astype(float)
+            df.loc[mask, 'pfx_z_dev_from_slot'] = (df.loc[mask, 'pfx_z'] - expected_z).astype(float)
 
     return df
 
