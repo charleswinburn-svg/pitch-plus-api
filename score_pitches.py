@@ -132,29 +132,23 @@ def engineer_stuff_features(df):
             with open(arm_angles_path) as _f:
                 _arm_angles = json.load(_f)
 
-        # League averages from baselines (neutral fallback for pitchers not in file)
-        if _arm_angles:
-            _aa_vals = [v['arm_angle'] for v in _arm_angles.values() if 'arm_angle' in v]
-            _aa_std_vals = [v['arm_angle_std'] for v in _arm_angles.values() if 'arm_angle_std' in v]
-            _league_aa = float(np.median(_aa_vals)) if _aa_vals else 45.0
-            _league_aa_std = float(np.median(_aa_std_vals)) if _aa_std_vals else 3.0
-        else:
-            _league_aa, _league_aa_std = 45.0, 3.0
-
-        df['arm_angle'] = _league_aa
-        df['arm_angle_std'] = _league_aa_std
-        df['arm_angle_dev'] = 0.0
-        df['pfx_x_dev_from_slot'] = 0.0
-        df['pfx_z_dev_from_slot'] = 0.0
+        # NaN defaults — LightGBM treats missing values via learned default branches,
+        # effectively neutralizing the 5 AA features. The other 20 features carry the prediction.
+        df['arm_angle'] = np.nan
+        df['arm_angle_std'] = np.nan
+        df['arm_angle_dev'] = np.nan
+        df['pfx_x_dev_from_slot'] = np.nan
+        df['pfx_z_dev_from_slot'] = np.nan
 
         for pid, group in df.groupby('pitcher'):
             pid_s = str(int(pid)) if pd.notna(pid) else None
             aa = _arm_angles.get(pid_s) if pid_s else None
             if not aa:
-                continue  # keep league-average defaults
+                continue  # keep NaN defaults
             mask = df['pitcher'] == pid
             df.loc[mask, 'arm_angle'] = aa['arm_angle']
             df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
+            df.loc[mask, 'arm_angle_dev'] = 0.0
             df.loc[mask, 'pfx_x_dev_from_slot'] = df.loc[mask, 'pfx_x'] - aa['pfx_x_slot']
             df.loc[mask, 'pfx_z_dev_from_slot'] = df.loc[mask, 'pfx_z'] - aa['pfx_z_slot']
 
