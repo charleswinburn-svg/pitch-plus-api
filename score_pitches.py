@@ -50,24 +50,44 @@ def _to_float64(df):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def engineer_stuff_features(df):
-    """Build the 24-feature stuff set used by the Stuff model."""
+    """v3 stuff features — matches stuff_model_v3 training notebook."""
     df = df.copy()
 
-    t = np.clip(50.0 / (-df['vy0'].values), 0.35, 0.55)
-    df['vaa'] = np.degrees(np.arctan2(
-        df['vz0'].values + df['az'].values * t,
-        -(df['vy0'].values + df['ay'].values * t)))
-    df['haa'] = np.degrees(np.arctan2(
-        df['vx0'].values + df['ax'].values * t,
-        -(df['vy0'].values + df['ay'].values * t)))
-    df['total_movement'] = np.sqrt(df['pfx_x']**2 + df['pfx_z']**2)
-    spin = df['release_spin_rate'].astype('float32').values
-    df['spin_efficiency'] = np.where(
-        spin > 0, df['total_movement'] / (spin / 1000), np.nan)
+    # Cast nullable dtypes
+    for col in ['release_spin_rate','release_pos_x','release_pos_z',
+                'pfx_x','pfx_z','release_speed','release_extension',
+                'spin_axis','arm_angle','ax','ay','az','vx0','vy0','vz0']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('float32')
 
-    # Fastball baseline per pitcher — loaded from models/pitcher_baselines.json
-    # (trailing-window averages, built separately by build_pitcher_baselines.py).
-    # Falls back to league-average FF for cold-start pitchers.
+    # ── Handedness-corrected horizontal break ──
+    hand_sign = np.where(df['p_throws'] == 'L', -1.0, 1.0).astype('float32')
+    df['arm_side_break'] = (df['pfx_x'].values * hand_sign).astype('float32')
+
+    # ── Total movement & spin efficiency ──
+    df['total_movement'] = np.sqrt(df['pfx_x']**2 + df['pfx_z']**2)
+    spin = df['release_spin_rate'].values
+    df['spin_efficiency'] = np.where(spin > 0, df['total_movement'] / (spin / 1000), np.nan)
+
+    # ── Spin axis circular encoding ──
+    if 'spin_axis' in df.columns:
+        axis_rad = np.deg2rad(df['spin_axis'].values)
+        df['spin_axis_sin'] = np.sin(axis_rad).astype('float32')
+        df['spin_axis_cos'] = np.cos(axis_rad).astype('float32')
+
+    # ── Release tilt ──
+    if 'vy0' in df.columns and 'vz0' in df.columns:
+        df['release_tilt'] = np.arctan2(df['vz0'].values, -df['vy0'].values).astype('float32')
+
+    # VAA/HAA still useful for tunnel features (computed below in their own function)
+    if all(c in df.columns for c in ['vy0','vz0','az','ay','vx0','ax']):
+        t = np.clip(50.0 / (-df['vy0'].values), 0.35, 0.55)
+        df['vaa'] = np.degrees(np.arctan2(df['vz0'].values + df['az'].values * t,
+                                           -(df['vy0'].values + df['ay'].values * t)))
+        df['haa'] = np.degrees(np.arctan2(df['vx0'].values + df['ax'].values * t,
+                                           -(df['vy0'].values + df['ay'].values * t)))
+
+    # ── Fastball baselines ──
     baselines_path = Path(__file__).parent / 'models' / 'pitcher_baselines.json'
     with open(baselines_path) as _f:
         _baselines = json.load(_f)
@@ -85,7 +105,7 @@ def engineer_stuff_features(df):
         df.loc[mask, 'fb_pfx_z'] = bl['fb_pfx_z']
         df.loc[mask, 'fb_spin'] = bl['fb_spin']
         df.loc[mask, 'fb_extension'] = bl['fb_extension']
-        df.loc[mask, 'fb_vaa'] = bl['fb_vaa']
+        df.loc[mask, 'fb_vaa'] = bl.get('fb_vaa', np.nan)
         df.loc[mask, 'fb_rel_x'] = bl['fb_release_x']
         df.loc[mask, 'fb_rel_z'] = bl['fb_release_z']
 
@@ -94,7 +114,7 @@ def engineer_stuff_features(df):
     df['delta_pfx_z']         = df['pfx_z'] - df['fb_pfx_z']
     df['delta_spin']          = df['release_spin_rate'] - df['fb_spin']
     df['delta_extension']     = df['release_extension'] - df['fb_extension']
-    df['delta_vaa']           = df['vaa'] - df['fb_vaa']
+    df['delta_vaa']           = df['vaa'] - df['fb_vaa'] if 'vaa' in df.columns else 0.0
     df['movement_separation'] = np.sqrt(df['delta_pfx_x']**2 + df['delta_pfx_z']**2)
     df['release_diff_x']      = df['release_pos_x'] - df['fb_rel_x']
     df['release_diff_z']      = df['release_pos_z'] - df['fb_rel_z']
@@ -102,13 +122,15 @@ def engineer_stuff_features(df):
     df = df.fillna({c: 0.0 for c in ['delta_velo','delta_pfx_x','delta_pfx_z','delta_spin',
         'delta_extension','delta_vaa','release_diff_x','release_diff_z','release_distance',
         'movement_separation']})
-    df['pitch_type_cat']      = df['pitch_type'].astype('category')
-    df['p_throws_cat']        = df['p_throws'].astype('category')
 
-    # ── Arm angle features (matches training notebook logic) ──
-    # arm_angle, arm_angle_std: per-pitcher rolling baseline (or per-pitch from parquet if Statcast)
-    # arm_angle_dev: actual_arm_angle - pitcher_mean (per-pitch in batch, 0 in live API)
-    # pfx_*_dev_from_slot: actual pfx - expected pfx from per-pitch-type linear regression on arm_angle
+    # ── Categoricals + platoon ──
+    df['pitch_type_cat'] = df['pitch_type'].astype('category')
+    df['p_throws_cat']   = df['p_throws'].astype('category')
+    if 'stand' in df.columns:
+        df['stand_cat']  = df['stand'].astype('category')
+        df['same_side']  = (df['p_throws'] == df['stand']).astype('int8')
+
+    # ── Arm angle ──
     arm_angles_path = Path(__file__).parent / 'models' / 'pitcher_arm_angles.json'
     slot_reg_path = Path(__file__).parent / 'models' / 'slot_regression.json'
     _arm_angles = {}
@@ -120,12 +142,9 @@ def engineer_stuff_features(df):
         with open(slot_reg_path) as _f:
             _slot_reg = json.load(_f)
 
-    # Initialize all 5 features to NaN — LightGBM handles missing
-    df['arm_angle'] = np.nan
+    df['arm_angle_baseline'] = np.nan
     df['arm_angle_std'] = np.nan
     df['arm_angle_dev'] = np.nan
-    df['pfx_x_dev_from_slot'] = np.nan
-    df['pfx_z_dev_from_slot'] = np.nan
 
     has_per_pitch_aa = 'arm_angle' in df.columns and pd.to_numeric(df['arm_angle'], errors='coerce').notna().any()
     if has_per_pitch_aa:
@@ -135,26 +154,54 @@ def engineer_stuff_features(df):
         pid_s = str(int(pid)) if pd.notna(pid) else None
         aa = _arm_angles.get(pid_s) if pid_s else None
         if not aa:
-            continue  # keep NaN — LightGBM ignores AA features for unknown pitchers
+            continue
         mask = df['pitcher'] == pid
-        df.loc[mask, 'arm_angle'] = aa['arm_angle']
+        df.loc[mask, 'arm_angle_baseline'] = aa['arm_angle']
         df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
         if has_per_pitch_aa:
             df.loc[mask, 'arm_angle_dev'] = (per_pitch_aa[mask] - aa['arm_angle']).fillna(0)
         else:
             df.loc[mask, 'arm_angle_dev'] = 0.0
 
-    # Slot regression: expected pfx given arm_angle, per pitch type (matches training)
-    if _slot_reg:
-        for pt, coef in _slot_reg.items():
-            mask = (df['pitch_type'] == pt) & df['arm_angle'].notna()
+    # arm_angle: prefer per-pitch, fall back to baseline
+    if has_per_pitch_aa:
+        df['arm_angle'] = per_pitch_aa.fillna(df['arm_angle_baseline'])
+    else:
+        df['arm_angle'] = df['arm_angle_baseline']
+    df = df.drop(columns=['arm_angle_baseline'])
+
+    # ── v3 SLOT REGRESSION: per (pitch_type, p_throws) ──
+    df['pfx_x_dev_from_slot'] = np.nan
+    df['pfx_z_dev_from_slot'] = np.nan
+    slot_coefs = _slot_reg.get('slot', _slot_reg) if _slot_reg else {}
+    if slot_coefs:
+        for pt in df['pitch_type'].dropna().unique():
+            for hand in ['L', 'R']:
+                key = f"{pt}_{hand}"
+                if key not in slot_coefs:
+                    continue
+                c = slot_coefs[key]
+                mask = (df['pitch_type'] == pt) & (df['p_throws'] == hand) & df['arm_angle'].notna()
+                if mask.sum() == 0:
+                    continue
+                arm = df.loc[mask, 'arm_angle']
+                exp_x = c['slope_x'] * arm + c['intercept_x']
+                exp_z = c['slope_z'] * arm + c['intercept_z']
+                df.loc[mask, 'pfx_x_dev_from_slot'] = (df.loc[mask, 'arm_side_break'] - exp_x).astype(float)
+                df.loc[mask, 'pfx_z_dev_from_slot'] = (df.loc[mask, 'pfx_z'] - exp_z).astype(float)
+
+    # ── v3 DRAG RESIDUAL: per pitch_type ──
+    df['ay_residual'] = 0.0
+    drag_coefs = _slot_reg.get('drag', {}) if _slot_reg else {}
+    if drag_coefs and 'ay' in df.columns:
+        for pt, c in drag_coefs.items():
+            mask = df['pitch_type'] == pt
             if mask.sum() == 0:
                 continue
-            arm = df.loc[mask, 'arm_angle']
-            expected_x = coef['slope_x'] * arm + coef['intercept_x']
-            expected_z = coef['slope_z'] * arm + coef['intercept_z']
-            df.loc[mask, 'pfx_x_dev_from_slot'] = (df.loc[mask, 'pfx_x'] - expected_x).astype(float)
-            df.loc[mask, 'pfx_z_dev_from_slot'] = (df.loc[mask, 'pfx_z'] - expected_z).astype(float)
+            expected_ay = (c['intercept']
+                           + c['slope_velo'] * df.loc[mask, 'release_speed']
+                           + c['slope_spin'] * df.loc[mask, 'release_spin_rate'])
+            df.loc[mask, 'ay_residual'] = (df.loc[mask, 'ay'] - expected_ay).astype(float)
 
     return df
 
