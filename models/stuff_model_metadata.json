@@ -8,8 +8,6 @@
     "spin_axis_cos",
     "release_extension",
     "release_pos_x",
-    "release_pos_z",
-    "release_tilt",
     "total_movement",
     "spin_efficiency",
     "ay",
@@ -32,11 +30,11 @@
     2024
   ],
   "target_year": 2025,
-  "cv_rmse": 0.17375373899763902,
-  "cv_r2": 0.010427981744706294,
-  "holdout_rmse": 0.17624728283085556,
-  "holdout_r2": 0.010557668037654233,
-  "best_iterations": 153,
+  "cv_rmse": 0.17447627624784595,
+  "cv_r2": 0.0021792453606210628,
+  "holdout_rmse": 0.17700270382414013,
+  "holdout_r2": 0.002057709045833356,
+  "best_iterations": 78,
   "params": {
     "objective": "regression",
     "metric": "rmse",
@@ -50,6 +48,31 @@
     "reg_lambda": 1.0,
     "n_estimators": 1000,
     "n_jobs": -1,
-    "random_state": 42
+    "random_state": 42,
+    "monotone_constraints": [
+      -1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      -1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      -1,
+      0,
+      0,
+      0
+    ],
+    "monotone_constraints_method": "advanced"
   }
 }
