@@ -96,6 +96,61 @@ else:
     pitch_plus_norm_aaa = None
     print("No AAA norms found — AAA pitches will use MLB norms")
 
+# ─────────────────────────────────────────────────────────────────────────
+# Pitcher grades — produced by score_pitches.py write_season_aggregates.
+# ─────────────────────────────────────────────────────────────────────────
+import os
+
+PITCHER_GRADES_DIR = Path(os.environ.get("PITCHER_GRADES_DIR", str(ROOT / "season")))
+pitcher_grades = {}  # {season: {pid_str: {...}}}
+
+if PITCHER_GRADES_DIR.exists():
+    for f in PITCHER_GRADES_DIR.glob("pitcher_grades_*.json"):
+        try:
+            season = int(f.stem.split("_")[-1])
+            with open(f) as fh:
+                pitcher_grades[season] = json.load(fh)
+            print(f"Loaded {len(pitcher_grades[season])} pitcher grades for {season} <- {f.name}")
+        except Exception as e:
+            print(f"Skipping {f.name}: {e}")
+else:
+    print(f"PITCHER_GRADES_DIR not found ({PITCHER_GRADES_DIR}) -- /pitcher_percentiles will return 503")
+
+
+def _percentile_rank(value, sorted_population):
+    """Where does `value` fall within the sorted ascending population?"""
+    if value is None or not sorted_population:
+        return None
+    n = len(sorted_population)
+    lo, hi = 0, n
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if sorted_population[mid] < value:
+            lo = mid + 1
+        else:
+            hi = mid
+    count_lt = lo
+    count_eq = 0
+    while lo < n and sorted_population[lo] == value:
+        count_eq += 1
+        lo += 1
+    rank = (count_lt + count_eq / 2) / n
+    return round(rank * 100, 1)
+
+
+def _qualified_distribution(grades_by_pid, metric, min_n=200):
+    """Sorted ascending list of `metric` values across qualified pitchers."""
+    vals = [
+        g[metric] for g in grades_by_pid.values()
+        if g.get(metric) is not None and g.get("n", 0) >= min_n
+    ]
+    vals.sort()
+    return vals
+
+
+
+
+
 print(f"Loaded {len(location_models)} location models, {len(pitcher_baselines)} baselines")
 
 PITCH_TYPE_CATS = ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
@@ -420,3 +475,57 @@ def score(req: PitchRequest):
     norm = (pitch_plus_norm_aaa if req.is_aaa and pitch_plus_norm_aaa else pitch_plus_norm)
     scored = engineer_and_score(rows, norm)
     return {"scores": scored}
+
+
+@app.get("/pitcher_percentiles/{pitcher_id}")
+def pitcher_percentiles(pitcher_id: int, season: int = 2026, min_n: int = 200):
+    """
+    Return Stuff+/Loc+/Tun+/Pitch+ values for one pitcher AND their
+    percentile rank within that season's qualified-pitcher distribution.
+
+    Qualified = pitchers with at least `min_n` scored pitches in the season.
+    Default 200 pitches ≈ 1-2 starts for a starter, several appearances for
+    a reliever — low enough to include most active arms without including
+    one-batter cameos.
+    """
+    if season not in pitcher_grades:
+        return {
+            "error": f"No grades loaded for season {season}",
+            "available_seasons": list(pitcher_grades.keys()),
+        }
+
+    grades = pitcher_grades[season]
+    pid_str = str(pitcher_id)
+    me = grades.get(pid_str)
+    if not me:
+        return {"error": f"Pitcher {pitcher_id} not found in {season} grades"}
+
+    metrics = ["stuff_plus", "loc_plus", "tun_plus", "pitch_plus"]
+    out = {
+        "pitcher_id": pitcher_id,
+        "season": season,
+        "n_pitches": me.get("n"),
+        "qualified": me.get("n", 0) >= min_n,
+        "qualified_threshold": min_n,
+    }
+    for m in metrics:
+        dist = _qualified_distribution(grades, m, min_n=min_n)
+        out[m] = {
+            "value": me.get(m),
+            "percentile": _percentile_rank(me.get(m), dist),
+            "population_size": len(dist),
+        }
+    return out
+
+
+@app.get("/pitcher_grades/{pitcher_id}")
+def pitcher_grade_lookup(pitcher_id: int, season: int = 2026):
+    """Raw aggregate for a single pitcher (no percentile)."""
+    if season not in pitcher_grades:
+        return {"error": f"No grades loaded for season {season}"}
+    pid_str = str(pitcher_id)
+    me = pitcher_grades[season].get(pid_str)
+    if not me:
+        return {"error": f"Pitcher {pitcher_id} not found"}
+    return {"pitcher_id": pitcher_id, "season": season, **me}
+
