@@ -408,100 +408,45 @@ def write_per_game_json(df, output_dir: Path, compress=True):
 
 def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path = None):
     """
-    Build season-level pitcher aggregates (rolling averages across all
-    scored pitches for the season so far). Two views:
+    Build season-level pitcher aggregates with correct Pitch+ scaling.
 
-    - per pitcher:                {pitcher_id: {n, xRV/100, stuff/100, ..., stuff_plus, loc_plus, tun_plus, pitch_plus}}
-    - per pitcher × pitch_type:   {pitcher_id: {pitch_type: {n, xRV/100, ...}}}
+    Bug fix vs. the previous version: the pitcher-overall Plus values
+    were computed by z-scoring the pitcher's mean xRV against per-pitch
+    league norms. That's wrong — per-pitch std is much larger than the
+    spread of pitcher averages, so it compressed every pitcher toward 100.
 
-    The new *_plus fields are the 100-centered Pitch+ scale (±10 per std)
-    that the API and frontend use everywhere else. Computed from xRV means
-    using the same league mean/std file the live /score endpoint uses, so
-    /score and the cached aggregates are on the same scale.
+    Correct approach (matches what /score does for the Summary view):
+      1. Compute per-(pitcher, type) Plus values from per-pitch norms.
+      2. For pitcher overall, weight-average those per-type Plus values
+         by pitch-type usage.
+
+    Algebraically these match what you'd get if you graded every individual
+    pitch then averaged: avg(100 - 10z) = 100 - 10*avg(z).
     """
     season_dir = output_dir / 'season'
     season_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load Pitch+ norms for converting xRV → Pitch+ scale (100 = avg, ±10 per std).
-    # Falls back to no scaling if file missing — *_plus fields will be null.
     pitch_plus_norm = None
     if norm_path and Path(norm_path).exists():
         with open(norm_path) as f:
             pitch_plus_norm = json.load(f)
-        # Use the "all" / aggregate league mean/std — same key the server reads
-        # for cross-pitch-type Pitch+ grading at the pitcher level.
-        # If your norm file is keyed only by pitch_type, we average across types
-        # weighted by usage to get a pitcher-level reference. See _grade_pitcher.
 
-    def _grade_pitcher(xrv_mean, kind, weights_by_pt):
-        """
-        Convert an xRV mean to Pitch+ scale.
-        kind: 'stuff' | 'loc' | 'tun' | 'pitch'
-        weights_by_pt: {pitch_type: count} for usage-weighted league mean/std.
-        """
-        if pitch_plus_norm is None or pd.isna(xrv_mean):
+    def _per_type_plus(xrv_per100, pitch_type, kind):
+        """Grade ONE pitch type for ONE pitcher. xrv_per100 is xRV*100."""
+        if pitch_plus_norm is None or pd.isna(xrv_per100):
             return None
         mean_key = {'stuff': 'stuff_mean', 'loc': 'loc_mean',
-                    'tun': 'tun_mean', 'pitch': 'mean'}[kind]
+                    'tun': 'tun_mean',     'pitch': 'mean'}[kind]
         std_key  = {'stuff': 'stuff_std',  'loc': 'loc_std',
-                    'tun': 'tun_std',  'pitch': 'std'}[kind]
-        # Usage-weighted league mean/std across this pitcher's actual mix
-        total = sum(weights_by_pt.values())
-        if total == 0:
+                    'tun': 'tun_std',      'pitch': 'std'}[kind]
+        n = pitch_plus_norm.get(pitch_type)
+        if not n or std_key not in n or n[std_key] <= 0:
             return None
-        wmean = wstd = 0.0
-        for pt, n in weights_by_pt.items():
-            norm = pitch_plus_norm.get(pt)
-            if not norm or std_key not in norm or norm[std_key] <= 0:
-                continue
-            wmean += norm[mean_key] * (n / total)
-            wstd  += norm[std_key]  * (n / total)
-        if wstd <= 0:
-            return None
-        # Server divides by 100 because xRV columns there are already raw model
-        # output. Here xRV mean is already in /100 units (we multiplied above),
-        # so unscale before z-scoring against league.
-        z = max(-4, min(4, (xrv_mean / 100 - wmean) / wstd))
+        # Undo the *100 from the agg step to get raw xRV.
+        z = max(-4, min(4, (xrv_per100 / 100 - n[mean_key]) / n[std_key]))
         return round(100 - z * 10, 1)
 
-    # ── Pitcher-level aggregation (overall) ──
-    pitcher_agg = df.groupby('pitcher').agg(
-        n=('xRV_final', 'count'),
-        xRV=('xRV_final', 'mean'),
-        stuff=('xRV_stuff', 'mean'),
-        loc=('xRV_location', 'mean'),
-        tun=('xRV_tunnel', 'mean'),
-    )
-
-    # Scale to per-100 and round
-    for col in ['xRV', 'stuff', 'loc', 'tun']:
-        pitcher_agg[col] = (pitcher_agg[col] * 100).round(3)
-
-    # Pitch-type usage per pitcher (for weighted Pitch+ baselines)
-    usage_by_pid = (
-        df.groupby(['pitcher', 'pitch_type'])
-          .size()
-          .unstack(fill_value=0)
-          .to_dict('index')
-    )
-
-    pitcher_out = {}
-    for pid, row in pitcher_agg.iterrows():
-        pid_str = str(int(pid))
-        weights = usage_by_pid.get(pid, {})
-        pitcher_out[pid_str] = {
-            'n':           int(row['n']),
-            'xRV':         float(row['xRV']),
-            'stuff':       float(row['stuff']),
-            'loc':         float(row['loc']),
-            'tun':         float(row['tun']),
-            'stuff_plus':  _grade_pitcher(row['stuff'], 'stuff', weights),
-            'loc_plus':    _grade_pitcher(row['loc'],   'loc',   weights),
-            'tun_plus':    _grade_pitcher(row['tun'],   'tun',   weights),
-            'pitch_plus':  _grade_pitcher(row['xRV'],   'pitch', weights),
-        }
-
-    # ── Pitcher × pitch_type aggregation ──
+    # ── Pitcher × pitch_type aggregation (compute per-type Plus values first) ──
     pt_agg = df.groupby(['pitcher', 'pitch_type']).agg(
         n=('xRV_final', 'count'),
         xRV=('xRV_final', 'mean'),
@@ -509,27 +454,61 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
         loc=('xRV_location', 'mean'),
         tun=('xRV_tunnel', 'mean'),
     ).reset_index()
-
     for col in ['xRV', 'stuff', 'loc', 'tun']:
         pt_agg[col] = (pt_agg[col] * 100).round(3)
 
     pt_out = {}
     for _, row in pt_agg.iterrows():
         pid = str(int(row['pitcher']))
-        if pid not in pt_out:
-            pt_out[pid] = {}
-        # Single-pitch-type Pitch+ grades use that type's own league mean/std.
-        n_one = {row['pitch_type']: 1}
-        pt_out[pid][row['pitch_type']] = {
+        pt = row['pitch_type']
+        pt_out.setdefault(pid, {})[pt] = {
             'n':           int(row['n']),
             'xRV':         float(row['xRV']),
             'stuff':       float(row['stuff']),
             'loc':         float(row['loc']),
             'tun':         float(row['tun']),
-            'stuff_plus':  _grade_pitcher(row['stuff'], 'stuff', n_one),
-            'loc_plus':    _grade_pitcher(row['loc'],   'loc',   n_one),
-            'tun_plus':    _grade_pitcher(row['tun'],   'tun',   n_one),
-            'pitch_plus':  _grade_pitcher(row['xRV'],   'pitch', n_one),
+            'stuff_plus':  _per_type_plus(row['stuff'], pt, 'stuff'),
+            'loc_plus':    _per_type_plus(row['loc'],   pt, 'loc'),
+            'tun_plus':    _per_type_plus(row['tun'],   pt, 'tun'),
+            'pitch_plus':  _per_type_plus(row['xRV'],   pt, 'pitch'),
+        }
+
+    # ── Pitcher overall — weight-average the per-type Plus values by usage ──
+    def _weighted_overall(pid_pt_grades, metric_key):
+        total = 0
+        weighted_sum = 0.0
+        for pt, g in pid_pt_grades.items():
+            v = g.get(metric_key)
+            n = g.get('n', 0)
+            if v is not None and n > 0:
+                weighted_sum += v * n
+                total += n
+        return round(weighted_sum / total, 1) if total else None
+
+    pitcher_agg = df.groupby('pitcher').agg(
+        n=('xRV_final', 'count'),
+        xRV=('xRV_final', 'mean'),
+        stuff=('xRV_stuff', 'mean'),
+        loc=('xRV_location', 'mean'),
+        tun=('xRV_tunnel', 'mean'),
+    )
+    for col in ['xRV', 'stuff', 'loc', 'tun']:
+        pitcher_agg[col] = (pitcher_agg[col] * 100).round(3)
+
+    pitcher_out = {}
+    for pid, row in pitcher_agg.iterrows():
+        pid_str = str(int(pid))
+        types = pt_out.get(pid_str, {})
+        pitcher_out[pid_str] = {
+            'n':           int(row['n']),
+            'xRV':         float(row['xRV']),
+            'stuff':       float(row['stuff']),
+            'loc':         float(row['loc']),
+            'tun':         float(row['tun']),
+            'stuff_plus':  _weighted_overall(types, 'stuff_plus'),
+            'loc_plus':    _weighted_overall(types, 'loc_plus'),
+            'tun_plus':    _weighted_overall(types, 'tun_plus'),
+            'pitch_plus':  _weighted_overall(types, 'pitch_plus'),
         }
 
     pitcher_path = season_dir / f'pitcher_grades_{season}.json'
@@ -587,7 +566,7 @@ def main():
     # Ensure required columns exist
     required = [
         'pitch_type', 'pitcher', 'game_pk', 'at_bat_number', 'pitch_number',
-        'season', 'stand', 'p_throws', 'plate_x', 'plate_z',
+        'stand', 'p_throws', 'plate_x', 'plate_z',
         'release_speed', 'release_spin_rate', 'release_extension',
         'pfx_x', 'pfx_z', 'spin_axis',
         'release_pos_x', 'release_pos_y', 'release_pos_z',
