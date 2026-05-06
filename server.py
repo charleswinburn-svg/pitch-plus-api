@@ -529,3 +529,26 @@ def pitcher_grade_lookup(pitcher_id: int, season: int = 2026):
         return {"error": f"Pitcher {pitcher_id} not found"}
     return {"pitcher_id": pitcher_id, "season": season, **me}
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# Add to server.py near the other pitcher_* endpoints. Returns the full
+# pitcher_grades dict for a season so the frontend can rank a live-computed
+# value against an arbitrary subset (e.g. percentile-card-eligible pitchers).
+# ─────────────────────────────────────────────────────────────────────────
+
+@app.get("/pitcher_grades_distribution")
+def pitcher_grades_distribution(season: int = 2026):
+    """
+    Return all cached pitcher grades for a season as { pitcher_id: {...} }.
+    Used by the PitcherCard's live-scoring path: it computes Stuff+/Loc+/...
+    fresh from MLB Stats API, then ranks the result against this distribution
+    (filtered client-side to whichever set of eligible pitchers it cares about).
+    """
+    if season not in pitcher_grades:
+        return {"error": f"No grades loaded for season {season}",
+                "available_seasons": list(pitcher_grades.keys())}
+    return {
+        "season": season,
+        "grades": pitcher_grades[season],
+    }
+
