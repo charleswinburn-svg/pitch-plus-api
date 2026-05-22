@@ -73,10 +73,10 @@ def main():
     df = pd.concat(dfs, ignore_index=True)
 
     # Filter to window
-    if 'game_date' not in df.columns:
-        print("ERROR: no game_date column in parquets. Can't compute trailing window.")
-        return
-    df = df[(df['game_date'] >= window_start) & (df['game_date'] <= asof)]
+    if "game_date" not in df.columns:
+        print("WARNING: no game_date column — using all available data, no trailing window")
+    else:
+        df = df[(df["game_date"] >= window_start) & (df["game_date"] <= asof)]
     print(f"  {len(df):,} pitches in window")
 
     # Cast
