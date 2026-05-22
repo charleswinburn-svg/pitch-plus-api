@@ -588,11 +588,11 @@ def _z_to_plus(v, mu, sd):
 def _build_leaderboard(season: int) -> dict:
     overall_path = PITCHER_GRADES_DIR / f"pitcher_grades_{season}.json"
     pt_path      = PITCHER_GRADES_DIR / f"pitcher_pitch_type_grades_{season}.json"
-    if not overall_path.exists() or not pt_path.exists():
+    if not overall_path.exists():
         return {"season": season, "pitchers": [], "error": "aggregates not found"}
 
     overall_raw = json.loads(overall_path.read_text())
-    pt_raw      = json.loads(pt_path.read_text())
+    pt_raw      = json.loads(pt_path.read_text()) if pt_path.exists() else {}
 
     overall_qualified = {
         pid: g for pid, g in overall_raw.items() if g.get("n", 0) >= MIN_N_OVERALL
