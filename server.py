@@ -25,9 +25,14 @@ MODELS_DIR = ROOT / "models"
 
 # ── Load everything once at startup ──
 print("Loading models...")
-stuff_model = lgb.Booster(model_file=str(MODELS_DIR / "stuff_model_2025.txt"))
 with open(MODELS_DIR / "stuff_model_metadata.json") as f:
-    stuff_features = json.load(f)["features"]
+    _stuff_meta = json.load(f)
+stuff_fb_model = lgb.Booster(model_file=str(MODELS_DIR / _stuff_meta["fb_model"]["file"]))
+stuff_offspeed_model = lgb.Booster(model_file=str(MODELS_DIR / _stuff_meta["offspeed_model"]["file"]))
+stuff_fb_features = _stuff_meta["fb_model"]["features"]
+stuff_offspeed_features = _stuff_meta["offspeed_model"]["features"]
+_STUFF_FB_TYPES = set(_stuff_meta["family_definition"]["fastball_types"])
+_STUFF_MPH_THRESHOLD = _stuff_meta["family_definition"]["mph_threshold"]
 
 tunnel_model = lgb.Booster(model_file=str(MODELS_DIR / "tunnel_model_2025.txt"))
 with open(MODELS_DIR / "tunnel_model_metadata.json") as f:
@@ -321,9 +326,16 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
                            + c['slope_spin'] * df.loc[mask, 'release_spin_rate'])
             df.loc[mask, 'ay_residual'] = (df.loc[mask, 'ay'] - expected_ay).astype(float)
 
-    # ── Stuff prediction (pass DataFrame to preserve categorical dtypes) ──
-    X_stuff = df[stuff_features]
-    df['xRV_stuff'] = stuff_model.predict(X_stuff)
+    # ── Stuff prediction: route FB vs offspeed by velocity proximity to fastball baseline ──
+    fb_mask = (
+        df['fb_velo'].notna() & (np.abs(df['release_speed'] - df['fb_velo']) <= _STUFF_MPH_THRESHOLD)
+    ) | (df['fb_velo'].isna() & df['pitch_type'].isin(_STUFF_FB_TYPES))
+    os_mask = ~fb_mask
+    df['xRV_stuff'] = 0.0
+    if fb_mask.any():
+        df.loc[fb_mask, 'xRV_stuff'] = stuff_fb_model.predict(df.loc[fb_mask, stuff_fb_features])
+    if os_mask.any():
+        df.loc[os_mask, 'xRV_stuff'] = stuff_offspeed_model.predict(df.loc[os_mask, stuff_offspeed_features])
 
     # ── Location features ──
     df['plate_x_adj'] = np.where(df['stand']=='L', -df['plate_x'], df['plate_x'])
