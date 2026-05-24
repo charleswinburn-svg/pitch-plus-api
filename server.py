@@ -160,9 +160,10 @@ def _qualified_distribution(grades_by_pid, metric, min_n=200):
 
 print(f"Loaded {len(location_models)} location models, {len(pitcher_baselines)} baselines")
 
-PITCH_TYPE_CATS = ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
-THROWS_CATS = ['L','R']
-STAND_CATS = ['L','R']
+_tpc = tunnel_model.pandas_categorical or []
+PITCH_TYPE_CATS = _tpc[0] if len(_tpc) > 0 else ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
+THROWS_CATS     = _tpc[1] if len(_tpc) > 1 else ['L','R']
+STAND_CATS      = ['L','R']
 
 # Rare pitch-type aliases applied before model scoring and norm lookup.
 PITCH_ALIASES = {'FO': 'FS'}
