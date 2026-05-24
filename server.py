@@ -11,11 +11,13 @@ returns: {"scores": [{"index": int, "pitch_plus": float|null, ...}, ...]}
 GET /health → {"status": "ok"}
 """
 import json
+from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any, Optional
@@ -25,9 +27,14 @@ MODELS_DIR = ROOT / "models"
 
 # ── Load everything once at startup ──
 print("Loading models...")
-stuff_model = lgb.Booster(model_file=str(MODELS_DIR / "stuff_model_2025.txt"))
 with open(MODELS_DIR / "stuff_model_metadata.json") as f:
-    stuff_features = json.load(f)["features"]
+    _stuff_meta = json.load(f)
+stuff_fb_model = lgb.Booster(model_file=str(MODELS_DIR / _stuff_meta["fb_model"]["file"]))
+stuff_offspeed_model = lgb.Booster(model_file=str(MODELS_DIR / _stuff_meta["offspeed_model"]["file"]))
+stuff_fb_features = _stuff_meta["fb_model"]["features"]
+stuff_offspeed_features = _stuff_meta["offspeed_model"]["features"]
+_STUFF_FB_TYPES = set(_stuff_meta["family_definition"]["fastball_types"])
+_STUFF_MPH_THRESHOLD = _stuff_meta["family_definition"]["mph_threshold"]
 
 tunnel_model = lgb.Booster(model_file=str(MODELS_DIR / "tunnel_model_2025.txt"))
 with open(MODELS_DIR / "tunnel_model_metadata.json") as f:
@@ -157,6 +164,9 @@ PITCH_TYPE_CATS = ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
 THROWS_CATS = ['L','R']
 STAND_CATS = ['L','R']
 
+# Rare pitch-type aliases applied before model scoring and norm lookup.
+PITCH_ALIASES = {'FO': 'FS'}
+
 
 def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
     """Convert MLB Stats API playEvent → Statcast-style row."""
@@ -204,7 +214,6 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
 
     # Alias rare pitch types to their closest equivalent for model scoring
     # FO (forkball) → FS (splitter): same grip family, same model treatment
-    PITCH_ALIASES = {'FO': 'FS'}
     df['pitch_type_display'] = df['pitch_type'].copy()  # preserve original for output
     df['pitch_type'] = df['pitch_type'].replace(PITCH_ALIASES)
 
@@ -321,9 +330,16 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
                            + c['slope_spin'] * df.loc[mask, 'release_spin_rate'])
             df.loc[mask, 'ay_residual'] = (df.loc[mask, 'ay'] - expected_ay).astype(float)
 
-    # ── Stuff prediction (pass DataFrame to preserve categorical dtypes) ──
-    X_stuff = df[stuff_features]
-    df['xRV_stuff'] = stuff_model.predict(X_stuff)
+    # ── Stuff prediction: route FB vs offspeed by velocity proximity to fastball baseline ──
+    fb_mask = (
+        df['fb_velo'].notna() & (np.abs(df['release_speed'] - df['fb_velo']) <= _STUFF_MPH_THRESHOLD)
+    ) | (df['fb_velo'].isna() & df['pitch_type'].isin(_STUFF_FB_TYPES))
+    os_mask = ~fb_mask
+    df['xRV_stuff'] = 0.0
+    if fb_mask.any():
+        df.loc[fb_mask, 'xRV_stuff'] = stuff_fb_model.predict(df.loc[fb_mask, stuff_fb_features])
+    if os_mask.any():
+        df.loc[os_mask, 'xRV_stuff'] = stuff_offspeed_model.predict(df.loc[os_mask, stuff_offspeed_features])
 
     # ── Location features ──
     df['plate_x_adj'] = np.where(df['stand']=='L', -df['plate_x'], df['plate_x'])
@@ -429,6 +445,7 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
             "xRV_stuff": float(row['xRV_stuff']),
             "xRV_location": float(row['xRV_location']),
             "xRV_tunnel": float(row['xRV_tunnel']),
+            "xRV_final": float(row['xRV_final']),
         })
     return out
 
@@ -475,6 +492,110 @@ def score(req: PitchRequest):
     norm = (pitch_plus_norm_aaa if req.is_aaa and pitch_plus_norm_aaa else pitch_plus_norm)
     scored = engineer_and_score(rows, norm)
     return {"scores": scored}
+
+
+def _per_type_plus_agg(xrv_mean: float, pitch_type: str, kind: str):
+    """Convert mean xRV to pitcher×pitch-type Plus scale.
+
+    Identical formula to score_pitches.py write_season_aggregates() so that
+    /score_aggregate on a full season matches /leaderboard exactly.
+    """
+    n = pitch_plus_norm.get(pitch_type)
+    if not n:
+        return None
+    mean_key = {'stuff': 'stuff_mean', 'loc': 'loc_mean', 'tun': 'tun_mean', 'pitch': 'mean'}[kind]
+    std_key  = {'stuff': 'stuff_std',  'loc': 'loc_std',  'tun': 'tun_std',  'pitch': 'std'}[kind]
+    if std_key not in n or n[std_key] <= 0:
+        return None
+    z = max(-4.0, min(4.0, (xrv_mean - n[mean_key]) / n[std_key]))
+    return round(100.0 - z * 10.0, 1)
+
+
+def _weighted_overall_agg(by_pt: dict) -> dict:
+    """Usage-weighted average of per-pitch-type Plus values."""
+    totals = {k: 0.0 for k in ('stuff', 'loc', 'tun', 'pitch')}
+    counts = {k: 0   for k in ('stuff', 'loc', 'tun', 'pitch')}
+    n_total = 0
+    for g in by_pt.values():
+        n = g.get('n', 0)
+        n_total += n
+        for k in ('stuff', 'loc', 'tun', 'pitch'):
+            v = g.get(k)
+            if v is not None and n > 0:
+                totals[k] += v * n
+                counts[k] += n
+    out = {'n': n_total}
+    for k in ('stuff', 'loc', 'tun', 'pitch'):
+        out[k] = round(totals[k] / counts[k], 1) if counts[k] else None
+    return out
+
+
+@app.post("/score_aggregate")
+def score_aggregate(req: PitchRequest):
+    """Score pitches and aggregate to the pitcher×pitch-type Plus scale.
+
+    Same payload as /score. Response by_pitch_type shape matches /leaderboard
+    so single-game and season numbers are directly comparable.
+    """
+    rows = []
+    pitcher_ids = []
+    for evt in req.pitches:
+        pid = evt.get("pitcher_id") or evt.get("_pitcher_id")
+        mapped = map_pitch(evt, pid)
+        if mapped:
+            rows.append(mapped)
+            pitcher_ids.append(pid)
+
+    if not rows:
+        return {"by_pitch_type": {}, "overall": {"stuff": None, "loc": None, "tun": None, "pitch": None, "n": 0}}
+
+    norm = (pitch_plus_norm_aaa if req.is_aaa and pitch_plus_norm_aaa else pitch_plus_norm)
+    scored = engineer_and_score(rows, norm)
+
+    def _new_bucket():
+        return {"stuff": 0.0, "loc": 0.0, "tun": 0.0, "pitch": 0.0, "n": 0}
+
+    cross = defaultdict(_new_bucket)
+    per_pid = defaultdict(lambda: defaultdict(_new_bucket))
+    distinct_pids = set()
+
+    for i, s in enumerate(scored):
+        pid = pitcher_ids[i]
+        pt = s.get("pitch_type")  # display type (pre-alias)
+        for b in (cross[pt], per_pid[pid][pt]):
+            b["stuff"] += s.get("xRV_stuff",    0.0)
+            b["loc"]   += s.get("xRV_location", 0.0)
+            b["tun"]   += s.get("xRV_tunnel",   0.0)
+            b["pitch"] += s.get("xRV_final",    0.0)
+            b["n"]     += 1
+        distinct_pids.add(pid)
+
+    def _bucket_to_plus(pt_display, b):
+        n = b["n"]
+        if n == 0:
+            return None
+        pt_norm = PITCH_ALIASES.get(pt_display, pt_display)
+        return {
+            "stuff": _per_type_plus_agg(b["stuff"] / n, pt_norm, "stuff"),
+            "loc":   _per_type_plus_agg(b["loc"]   / n, pt_norm, "loc"),
+            "tun":   _per_type_plus_agg(b["tun"]   / n, pt_norm, "tun"),
+            "pitch": _per_type_plus_agg(b["pitch"] / n, pt_norm, "pitch"),
+            "n": n,
+        }
+
+    by_pt = {pt: g for pt, b in cross.items() if (g := _bucket_to_plus(pt, b)) is not None}
+    resp = {"by_pitch_type": by_pt, "overall": _weighted_overall_agg(by_pt)}
+
+    if len(distinct_pids) > 1:
+        resp["by_pitcher"] = {}
+        for pid, pt_map in per_pid.items():
+            pid_by_pt = {pt: g for pt, b in pt_map.items() if (g := _bucket_to_plus(pt, b)) is not None}
+            resp["by_pitcher"][str(pid)] = {
+                "by_pitch_type": pid_by_pt,
+                "overall": _weighted_overall_agg(pid_by_pt),
+            }
+
+    return resp
 
 
 @app.get("/pitcher_percentiles/{pitcher_id}")
@@ -552,3 +673,54 @@ def pitcher_grades_distribution(season: int = 2026):
         "grades": pitcher_grades[season],
     }
 
+
+MIN_N_OVERALL = 200
+MIN_N_PER_PITCH_TYPE = 30
+
+
+@lru_cache(maxsize=8)
+def _build_leaderboard(season: int) -> dict:
+    overall_path = PITCHER_GRADES_DIR / f"pitcher_grades_{season}.json"
+    pt_path      = PITCHER_GRADES_DIR / f"pitcher_pitch_type_grades_{season}.json"
+    if not overall_path.exists():
+        return {"season": season, "pitchers": [], "error": "aggregates not found"}
+
+    overall_raw = json.loads(overall_path.read_text())
+    pt_raw      = json.loads(pt_path.read_text()) if pt_path.exists() else {}
+
+    result = []
+    for pid, g in overall_raw.items():
+        if g.get("n", 0) < MIN_N_OVERALL:
+            continue
+        overall = {
+            "stuff": g.get("stuff_plus"),
+            "loc":   g.get("loc_plus"),
+            "tun":   g.get("tun_plus"),
+            "pitch": g.get("pitch_plus"),
+            "n":     int(g["n"]),
+        }
+        by_pt = {}
+        for pt, pg in pt_raw.get(pid, {}).items():
+            if pg.get("n", 0) < MIN_N_PER_PITCH_TYPE:
+                continue
+            by_pt[pt] = {
+                "stuff": pg.get("stuff_plus"),
+                "loc":   pg.get("loc_plus"),
+                "tun":   pg.get("tun_plus"),
+                "pitch": pg.get("pitch_plus"),
+                "n":     int(pg["n"]),
+            }
+        result.append({
+            "player_id":     int(pid),
+            "overall":       overall,
+            "by_pitch_type": by_pt,
+        })
+
+    return {"season": season, "pitchers": result}
+
+
+@app.get("/leaderboard")
+def leaderboard(season: int = 2026):
+    if season < 2015 or season > 2100:
+        raise HTTPException(status_code=400, detail=f"season out of range: {season}")
+    return _build_leaderboard(season)

@@ -293,9 +293,13 @@ def engineer_location_features(df):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def load_models(model_dir: Path):
-    stuff = lgb.Booster(model_file=str(model_dir / 'stuff_model_2025.txt'))
     with open(model_dir / 'stuff_model_metadata.json') as f:
-        stuff_features = json.load(f)['features']
+        stuff_meta = json.load(f)
+    stuff_fb = lgb.Booster(model_file=str(model_dir / stuff_meta['fb_model']['file']))
+    stuff_offspeed = lgb.Booster(model_file=str(model_dir / stuff_meta['offspeed_model']['file']))
+    stuff_fb_features = stuff_meta['fb_model']['features']
+    stuff_offspeed_features = stuff_meta['offspeed_model']['features']
+    stuff_family = stuff_meta['family_definition']
 
     tunnel = lgb.Booster(model_file=str(model_dir / 'tunnel_model_2025.txt'))
 
@@ -304,7 +308,7 @@ def load_models(model_dir: Path):
         pt = f.stem.split('_')[2]  # location_model_FF_2025 → FF
         location_models[pt] = lgb.Booster(model_file=str(f))
 
-    return stuff, stuff_features, tunnel, location_models
+    return stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -324,14 +328,24 @@ LOCATION_FEATURES = [
 ]
 
 
-def score_dataframe(df, stuff, stuff_features, tunnel, location_models, weights):
+def score_dataframe(df, stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models, weights):
     """Run all three model stages on a dataframe, return df with prediction cols."""
     df = engineer_stuff_features(df)
     df = engineer_tunnel_features(df)
     df = engineer_location_features(df)
 
-    # Stuff
-    df['xRV_stuff'] = stuff.predict(df[stuff_features]).astype('float32')
+    # Stuff: route FB vs offspeed by velocity proximity to fastball baseline
+    mph = stuff_family['mph_threshold']
+    fb_types = set(stuff_family['fastball_types'])
+    fb_mask = (
+        df['fb_velo'].notna() & (np.abs(df['release_speed'] - df['fb_velo']) <= mph)
+    ) | (df['fb_velo'].isna() & df['pitch_type'].isin(fb_types))
+    os_mask = ~fb_mask
+    df['xRV_stuff'] = np.float32(0.0)
+    if fb_mask.any():
+        df.loc[fb_mask, 'xRV_stuff'] = stuff_fb.predict(df.loc[fb_mask, stuff_fb_features]).astype('float32')
+    if os_mask.any():
+        df.loc[os_mask, 'xRV_stuff'] = stuff_offspeed.predict(df.loc[os_mask, stuff_offspeed_features]).astype('float32')
 
     # Tunnel
     df['xRV_tunnel'] = np.float32(0.0)
@@ -547,8 +561,8 @@ def main():
     config_path = Path(args.config)
 
     print(f'Loading models from {model_dir}...')
-    stuff, stuff_features, tunnel, location_models = load_models(model_dir)
-    print(f'  Stuff: {len(stuff_features)} features')
+    stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models = load_models(model_dir)
+    print(f'  Stuff FB: {len(stuff_fb_features)} features, Offspeed: {len(stuff_offspeed_features)} features')
     print(f'  Location: {len(location_models)} per-pitch-type models')
     print(f'  Tunnel: loaded')
 
@@ -587,7 +601,7 @@ def main():
 
     print('Running models...')
     df = _to_float64(df)
-    df = score_dataframe(df, stuff, stuff_features, tunnel, location_models, weights)
+    df = score_dataframe(df, stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models, weights)
     print(f'  Scored {len(df):,} pitches')
     print(f'  Mean predicted xRV: {df["xRV_final"].mean():.5f}')
     print(f'  Mean actual xRV:    {df["xRV"].mean():.5f}' if 'xRV' in df.columns else '')
