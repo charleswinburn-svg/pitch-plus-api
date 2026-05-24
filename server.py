@@ -11,6 +11,7 @@ returns: {"scores": [{"index": int, "pitch_plus": float|null, ...}, ...]}
 GET /health → {"status": "ok"}
 """
 import json
+from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 import numpy as np
@@ -163,6 +164,9 @@ PITCH_TYPE_CATS = ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
 THROWS_CATS = ['L','R']
 STAND_CATS = ['L','R']
 
+# Rare pitch-type aliases applied before model scoring and norm lookup.
+PITCH_ALIASES = {'FO': 'FS'}
+
 
 def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
     """Convert MLB Stats API playEvent → Statcast-style row."""
@@ -210,7 +214,6 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
 
     # Alias rare pitch types to their closest equivalent for model scoring
     # FO (forkball) → FS (splitter): same grip family, same model treatment
-    PITCH_ALIASES = {'FO': 'FS'}
     df['pitch_type_display'] = df['pitch_type'].copy()  # preserve original for output
     df['pitch_type'] = df['pitch_type'].replace(PITCH_ALIASES)
 
@@ -442,6 +445,7 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
             "xRV_stuff": float(row['xRV_stuff']),
             "xRV_location": float(row['xRV_location']),
             "xRV_tunnel": float(row['xRV_tunnel']),
+            "xRV_final": float(row['xRV_final']),
         })
     return out
 
@@ -488,6 +492,110 @@ def score(req: PitchRequest):
     norm = (pitch_plus_norm_aaa if req.is_aaa and pitch_plus_norm_aaa else pitch_plus_norm)
     scored = engineer_and_score(rows, norm)
     return {"scores": scored}
+
+
+def _per_type_plus_agg(xrv_mean: float, pitch_type: str, kind: str):
+    """Convert mean xRV to pitcher×pitch-type Plus scale.
+
+    Identical formula to score_pitches.py write_season_aggregates() so that
+    /score_aggregate on a full season matches /leaderboard exactly.
+    """
+    n = pitch_plus_norm.get(pitch_type)
+    if not n:
+        return None
+    mean_key = {'stuff': 'stuff_mean', 'loc': 'loc_mean', 'tun': 'tun_mean', 'pitch': 'mean'}[kind]
+    std_key  = {'stuff': 'stuff_std',  'loc': 'loc_std',  'tun': 'tun_std',  'pitch': 'std'}[kind]
+    if std_key not in n or n[std_key] <= 0:
+        return None
+    z = max(-4.0, min(4.0, (xrv_mean - n[mean_key]) / n[std_key]))
+    return round(100.0 - z * 10.0, 1)
+
+
+def _weighted_overall_agg(by_pt: dict) -> dict:
+    """Usage-weighted average of per-pitch-type Plus values."""
+    totals = {k: 0.0 for k in ('stuff', 'loc', 'tun', 'pitch')}
+    counts = {k: 0   for k in ('stuff', 'loc', 'tun', 'pitch')}
+    n_total = 0
+    for g in by_pt.values():
+        n = g.get('n', 0)
+        n_total += n
+        for k in ('stuff', 'loc', 'tun', 'pitch'):
+            v = g.get(k)
+            if v is not None and n > 0:
+                totals[k] += v * n
+                counts[k] += n
+    out = {'n': n_total}
+    for k in ('stuff', 'loc', 'tun', 'pitch'):
+        out[k] = round(totals[k] / counts[k], 1) if counts[k] else None
+    return out
+
+
+@app.post("/score_aggregate")
+def score_aggregate(req: PitchRequest):
+    """Score pitches and aggregate to the pitcher×pitch-type Plus scale.
+
+    Same payload as /score. Response by_pitch_type shape matches /leaderboard
+    so single-game and season numbers are directly comparable.
+    """
+    rows = []
+    pitcher_ids = []
+    for evt in req.pitches:
+        pid = evt.get("pitcher_id") or evt.get("_pitcher_id")
+        mapped = map_pitch(evt, pid)
+        if mapped:
+            rows.append(mapped)
+            pitcher_ids.append(pid)
+
+    if not rows:
+        return {"by_pitch_type": {}, "overall": {"stuff": None, "loc": None, "tun": None, "pitch": None, "n": 0}}
+
+    norm = (pitch_plus_norm_aaa if req.is_aaa and pitch_plus_norm_aaa else pitch_plus_norm)
+    scored = engineer_and_score(rows, norm)
+
+    def _new_bucket():
+        return {"stuff": 0.0, "loc": 0.0, "tun": 0.0, "pitch": 0.0, "n": 0}
+
+    cross = defaultdict(_new_bucket)
+    per_pid = defaultdict(lambda: defaultdict(_new_bucket))
+    distinct_pids = set()
+
+    for i, s in enumerate(scored):
+        pid = pitcher_ids[i]
+        pt = s.get("pitch_type")  # display type (pre-alias)
+        for b in (cross[pt], per_pid[pid][pt]):
+            b["stuff"] += s.get("xRV_stuff",    0.0)
+            b["loc"]   += s.get("xRV_location", 0.0)
+            b["tun"]   += s.get("xRV_tunnel",   0.0)
+            b["pitch"] += s.get("xRV_final",    0.0)
+            b["n"]     += 1
+        distinct_pids.add(pid)
+
+    def _bucket_to_plus(pt_display, b):
+        n = b["n"]
+        if n == 0:
+            return None
+        pt_norm = PITCH_ALIASES.get(pt_display, pt_display)
+        return {
+            "stuff": _per_type_plus_agg(b["stuff"] / n, pt_norm, "stuff"),
+            "loc":   _per_type_plus_agg(b["loc"]   / n, pt_norm, "loc"),
+            "tun":   _per_type_plus_agg(b["tun"]   / n, pt_norm, "tun"),
+            "pitch": _per_type_plus_agg(b["pitch"] / n, pt_norm, "pitch"),
+            "n": n,
+        }
+
+    by_pt = {pt: g for pt, b in cross.items() if (g := _bucket_to_plus(pt, b)) is not None}
+    resp = {"by_pitch_type": by_pt, "overall": _weighted_overall_agg(by_pt)}
+
+    if len(distinct_pids) > 1:
+        resp["by_pitcher"] = {}
+        for pid, pt_map in per_pid.items():
+            pid_by_pt = {pt: g for pt, b in pt_map.items() if (g := _bucket_to_plus(pt, b)) is not None}
+            resp["by_pitcher"][str(pid)] = {
+                "by_pitch_type": pid_by_pt,
+                "overall": _weighted_overall_agg(pid_by_pt),
+            }
+
+    return resp
 
 
 @app.get("/pitcher_percentiles/{pitcher_id}")
