@@ -11,7 +11,6 @@ returns: {"scores": [{"index": int, "pitch_plus": float|null, ...}, ...]}
 GET /health → {"status": "ok"}
 """
 import json
-import statistics
 from functools import lru_cache
 from pathlib import Path
 import numpy as np
@@ -571,19 +570,6 @@ MIN_N_OVERALL = 200
 MIN_N_PER_PITCH_TYPE = 30
 
 
-def _to_plus_pool(per100_values):
-    if len(per100_values) < 2:
-        return 0.0, 1.0
-    mu = statistics.mean(per100_values)
-    sd = statistics.pstdev(per100_values)
-    return mu, (sd if sd > 0 else 1.0)
-
-
-def _z_to_plus(v, mu, sd):
-    z = (v - mu) / sd if sd else 0
-    return round(100 - z * 10, 1)
-
-
 @lru_cache(maxsize=8)
 def _build_leaderboard(season: int) -> dict:
     overall_path = PITCHER_GRADES_DIR / f"pitcher_grades_{season}.json"
@@ -594,51 +580,32 @@ def _build_leaderboard(season: int) -> dict:
     overall_raw = json.loads(overall_path.read_text())
     pt_raw      = json.loads(pt_path.read_text()) if pt_path.exists() else {}
 
-    overall_qualified = {
-        pid: g for pid, g in overall_raw.items() if g.get("n", 0) >= MIN_N_OVERALL
-    }
-    overall_pools = {}
-    for metric in ("xRV", "stuff", "loc", "tun"):
-        vals = [g[metric] for g in overall_qualified.values()]
-        overall_pools[metric] = _to_plus_pool(vals)
-
-    overall_plus = {}
-    for pid, g in overall_qualified.items():
-        overall_plus[pid] = {
-            "stuff": _z_to_plus(g["stuff"], *overall_pools["stuff"]),
-            "loc":   _z_to_plus(g["loc"],   *overall_pools["loc"]),
-            "tun":   _z_to_plus(g["tun"],   *overall_pools["tun"]),
-            "pitch": _z_to_plus(g["xRV"],   *overall_pools["xRV"]),
+    result = []
+    for pid, g in overall_raw.items():
+        if g.get("n", 0) < MIN_N_OVERALL:
+            continue
+        overall = {
+            "stuff": g.get("stuff_plus"),
+            "loc":   g.get("loc_plus"),
+            "tun":   g.get("tun_plus"),
+            "pitch": g.get("pitch_plus"),
             "n":     int(g["n"]),
         }
-
-    by_pt_groups = {}
-    for pid, types in pt_raw.items():
-        for pt, g in types.items():
-            if g.get("n", 0) < MIN_N_PER_PITCH_TYPE:
+        by_pt = {}
+        for pt, pg in pt_raw.get(pid, {}).items():
+            if pg.get("n", 0) < MIN_N_PER_PITCH_TYPE:
                 continue
-            by_pt_groups.setdefault(pt, []).append((pid, g))
-
-    by_pt_plus = {}
-    for pt, rows in by_pt_groups.items():
-        pools = {}
-        for metric in ("xRV", "stuff", "loc", "tun"):
-            pools[metric] = _to_plus_pool([g[metric] for _, g in rows])
-        for pid, g in rows:
-            by_pt_plus.setdefault(pid, {})[pt] = {
-                "stuff": _z_to_plus(g["stuff"], *pools["stuff"]),
-                "loc":   _z_to_plus(g["loc"],   *pools["loc"]),
-                "tun":   _z_to_plus(g["tun"],   *pools["tun"]),
-                "pitch": _z_to_plus(g["xRV"],   *pools["xRV"]),
-                "n":     int(g["n"]),
+            by_pt[pt] = {
+                "stuff": pg.get("stuff_plus"),
+                "loc":   pg.get("loc_plus"),
+                "tun":   pg.get("tun_plus"),
+                "pitch": pg.get("pitch_plus"),
+                "n":     int(pg["n"]),
             }
-
-    result = []
-    for pid, overall in overall_plus.items():
         result.append({
             "player_id":     int(pid),
             "overall":       overall,
-            "by_pitch_type": by_pt_plus.get(pid, {}),
+            "by_pitch_type": by_pt,
         })
 
     return {"season": season, "pitchers": result}
