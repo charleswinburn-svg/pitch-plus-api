@@ -132,7 +132,13 @@ def compute_baselines(df, rolling_starts=3, source_label="MLB"):
         pfx_x = float(recent['pfx_x'].mean()) if recent['pfx_x'].notna().sum() > 5 else 0.0
         pfx_z = float(recent['pfx_z'].mean()) if recent['pfx_z'].notna().sum() > 5 else 0.0
 
-        out[str(int(pid))] = {
+        p_throws = None
+        if 'p_throws' in recent.columns:
+            counts = recent['p_throws'].value_counts()
+            if len(counts):
+                p_throws = counts.index[0]
+
+        entry = {
             'arm_angle': round(aa_mean, 2),
             'arm_angle_std': round(aa_std, 3),
             'pfx_x_slot': round(pfx_x, 4),
@@ -141,6 +147,9 @@ def compute_baselines(df, rolling_starts=3, source_label="MLB"):
             '_n_pitches': int(len(recent)),
             '_n_games': int(len(recent['game_date'].unique())),
         }
+        if p_throws:
+            entry['p_throws'] = p_throws
+        out[str(int(pid))] = entry
     return out
 
 

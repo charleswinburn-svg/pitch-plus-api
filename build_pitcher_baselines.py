@@ -103,6 +103,10 @@ def baseline_record(sub, primary, cold=False, source=None):
         'fb_plate_z':   float(sub['plate_z'].mean()),
     }
     if source: rec['_source'] = source
+    if 'p_throws' in sub.columns:
+        counts = sub['p_throws'].value_counts()
+        if len(counts):
+            rec['p_throws'] = counts.index[0]
     return rec
 
 
