@@ -219,9 +219,13 @@ def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
     type_code = (evt.get("details") or {}).get("type", {}).get("code")
     if not type_code:
         return None
-    pfx_x, pfx_z = _pfx_from_kinematics(
-        coords.get("aX"), coords.get("aY"), coords.get("aZ"), coords.get("vY0"),
-    )
+    if evt.get("_pfx_direct"):
+        pfx_x = coords.get("pfxX")
+        pfx_z = coords.get("pfxZ")
+    else:
+        pfx_x, pfx_z = _pfx_from_kinematics(
+            coords.get("aX"), coords.get("aY"), coords.get("aZ"), coords.get("vY0"),
+        )
     return {
         "pitch_type": type_code,
         "release_speed": pd_.get("startSpeed"),
