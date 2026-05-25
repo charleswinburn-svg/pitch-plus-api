@@ -55,12 +55,26 @@ intercept = config["intercept"]
 with open(MODELS_DIR / "pitcher_baselines.json") as f:
     pitcher_baselines = json.load(f)
 
+# Authoritative pitcher handedness: baselines take priority, then arm_angles.
+# Populated from p_throws field added by build_pitcher_baselines.py /
+# build_arm_angle_baselines.py. Overrides whatever the frontend sends.
+pitcher_p_throws: dict[str, str] = {
+    pid: d["p_throws"]
+    for pid, d in pitcher_baselines.items()
+    if d.get("p_throws") in ("L", "R")
+}
+
 # Arm angle baselines (for new stuff model)
 arm_angle_path = MODELS_DIR / "pitcher_arm_angles.json"
 if arm_angle_path.exists():
     with open(arm_angle_path) as f:
         pitcher_arm_angles = json.load(f)
+    # Fill in any handedness not already in baselines
+    for pid, d in pitcher_arm_angles.items():
+        if pid not in pitcher_p_throws and d.get("p_throws") in ("L", "R"):
+            pitcher_p_throws[pid] = d["p_throws"]
     print(f"Loaded {len(pitcher_arm_angles)} MLB pitcher arm angle baselines")
+    print(f"Authoritative handedness: {len(pitcher_p_throws)} pitchers (L/R override from model files)")
 else:
     pitcher_arm_angles = {}
     print("No pitcher_arm_angles.json — arm angle features will default to 0")
@@ -160,9 +174,10 @@ def _qualified_distribution(grades_by_pid, metric, min_n=200):
 
 print(f"Loaded {len(location_models)} location models, {len(pitcher_baselines)} baselines")
 
-PITCH_TYPE_CATS = ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
-THROWS_CATS = ['L','R']
-STAND_CATS = ['L','R']
+_tpc = tunnel_model.pandas_categorical or []
+PITCH_TYPE_CATS = _tpc[0] if len(_tpc) > 0 else ['CH','CU','FC','FF','FS','KC','SI','SL','ST','SV']
+THROWS_CATS     = _tpc[1] if len(_tpc) > 1 else ['L','R']
+STAND_CATS      = ['L','R']
 
 # Rare pitch-type aliases applied before model scoring and norm lookup.
 PITCH_ALIASES = {'FO': 'FS'}
@@ -226,6 +241,19 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
 
     # ── v3 STUFF FEATURES ──
     # Match stuff_model_v3 training notebook exactly.
+
+    # Override p_throws with authoritative handedness for known pitchers.
+    # This guards against the frontend sending the wrong handedness (default "R")
+    # for LHP with unusual pfx profiles (e.g. extreme arm-slot pitchers).
+    if pitcher_p_throws:
+        for pid_str, pt in pitcher_p_throws.items():
+            try:
+                pid_int = int(pid_str)
+            except (ValueError, TypeError):
+                continue
+            mask = df['pitcher'] == pid_int
+            if mask.any():
+                df.loc[mask, 'p_throws'] = pt
 
     # Handedness-corrected horizontal break (positive = arm side)
     hand_sign = np.where(df['p_throws'] == 'L', -1.0, 1.0)
