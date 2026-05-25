@@ -11,6 +11,7 @@ returns: {"scores": [{"index": int, "pitch_plus": float|null, ...}, ...]}
 GET /health → {"status": "ok"}
 """
 import json
+import math
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
@@ -182,6 +183,31 @@ STAND_CATS      = ['L','R']
 # Rare pitch-type aliases applied before model scoring and norm lookup.
 PITCH_ALIASES = {'FO': 'FS'}
 
+_GRAVITY = 32.174        # ft/s²
+_Y0_REF  = 50.0          # Statcast kinematic reference y (ft from back of plate)
+_Y_PLATE = 17.0 / 12.0  # front of plate (ft)
+
+
+def _pfx_from_kinematics(ax, ay, az, vy0):
+    """
+    Derive Statcast-style pfx in feet from kinematic components (MLB Stats API).
+    pfx = aerodynamic deviation from gravity-only trajectory at front of plate.
+    ax, ay, az in ft/s²; vy0 in ft/s. Same coordinate system as Statcast.
+    Bypasses MLB Stats API pfxX/pfxZ which use opposite sign convention from Statcast.
+    """
+    if any(v is None for v in [ax, ay, az, vy0]):
+        return None, None
+    dy   = _Y0_REF - _Y_PLATE          # 48.583 ft
+    disc = vy0 * vy0 - 2.0 * ay * dy
+    if disc < 0:
+        return None, None
+    t = (-vy0 - math.sqrt(disc)) / ay  # vy0<0, ay>0 → positive flight time
+    if t <= 0:
+        return None, None
+    pfx_x = 0.5 * ax * t * t
+    pfx_z = 0.5 * (az + _GRAVITY) * t * t  # subtract gravity's contribution
+    return pfx_x, pfx_z
+
 
 def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
     """Convert MLB Stats API playEvent → Statcast-style row."""
@@ -193,13 +219,16 @@ def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
     type_code = (evt.get("details") or {}).get("type", {}).get("code")
     if not type_code:
         return None
+    pfx_x, pfx_z = _pfx_from_kinematics(
+        coords.get("aX"), coords.get("aY"), coords.get("aZ"), coords.get("vY0"),
+    )
     return {
         "pitch_type": type_code,
         "release_speed": pd_.get("startSpeed"),
         "release_spin_rate": breaks.get("spinRate"),
         "release_extension": pd_.get("extension"),
-        "pfx_x": coords.get("pfxX"),
-        "pfx_z": coords.get("pfxZ"),
+        "pfx_x": pfx_x,
+        "pfx_z": pfx_z,
         "plate_x": coords.get("pX"),
         "plate_z": coords.get("pZ"),
         "release_pos_x": coords.get("x0"),
