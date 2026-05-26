@@ -499,7 +499,8 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
                     'tun': 'tun_mean',     'pitch': 'mean'}[kind]
         std_key  = {'stuff': 'stuff_std',  'loc': 'loc_std',
                     'tun': 'tun_std',      'pitch': 'std'}[kind]
-        n = pitch_plus_norm.get(pitch_type)
+        norm_pt = PITCH_TYPE_REMAP.get(pitch_type, pitch_type)
+        n = pitch_plus_norm.get(norm_pt)
         if not n or std_key not in n or n[std_key] <= 0:
             return None
         # Undo the *100 from the agg step to get raw xRV.
