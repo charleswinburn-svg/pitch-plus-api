@@ -80,6 +80,15 @@ else:
     pitcher_arm_angles = {}
     print("No pitcher_arm_angles.json — arm angle features will default to 0")
 
+# Pitcher heights cache for geometric arm-angle estimation (WBC/AAA pitchers not
+# in arm_angles baseline files). Built by build_pitcher_heights.py.
+_pitcher_heights: dict = {}
+_heights_path = MODELS_DIR / "pitcher_heights.json"
+if _heights_path.exists():
+    with open(_heights_path) as _f:
+        _pitcher_heights = json.load(_f)
+    print(f"Loaded {len(_pitcher_heights)} pitcher heights for geometric arm-angle fallback")
+
 # AAA arm angle baselines (fallback for prospects/call-ups not yet in MLB data)
 aaa_arm_angle_path = MODELS_DIR / "pitcher_arm_angles_aaa.json"
 if aaa_arm_angle_path.exists():
@@ -355,6 +364,26 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
         df.loc[mask, 'arm_angle'] = aa['arm_angle']
         df.loc[mask, 'arm_angle_std'] = aa['arm_angle_std']
         df.loc[mask, 'arm_angle_dev'] = 0.0  # no per-pitch AA from MLB Stats API
+
+    # Geometric fallback for pitchers with no arm_angle baseline (WBC/AAA).
+    # Estimates angle from release position and cached pitcher height.
+    _DEFAULT_H = 74.0  # 6'2" average MLB pitcher height
+    _nan_aa = df['arm_angle'].isna()
+    if _nan_aa.any():
+        _rel_x = pd.to_numeric(df.loc[_nan_aa, 'release_pos_x'], errors='coerce').values
+        _rel_z = pd.to_numeric(df.loc[_nan_aa, 'release_pos_z'], errors='coerce').values
+        _throws = df.loc[_nan_aa, 'p_throws'].values if 'p_throws' in df.columns else np.full(_nan_aa.sum(), 'R')
+        _h = np.array([
+            _pitcher_heights.get(str(int(pid)), _DEFAULT_H) if pd.notna(pid) else _DEFAULT_H
+            for pid in df.loc[_nan_aa, 'pitcher']
+        ], dtype='float64')
+        _shoulder_z = _h * 0.70
+        _adj = (_rel_z * 12.0) - _shoulder_z
+        _opp = np.abs(_rel_x * 12.0)
+        _est = np.degrees(np.arctan2(_opp, _adj))
+        _est = np.where(_throws == 'L', -_est, _est)
+        df.loc[_nan_aa, 'arm_angle'] = _est
+        df.loc[_nan_aa & df['arm_angle_dev'].isna(), 'arm_angle_dev'] = 0.0
 
     # ── v3 SLOT REGRESSION: per (pitch_type, p_throws) ──
     # arm_side_break - (slope * arm_angle + intercept)
