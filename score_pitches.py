@@ -132,15 +132,20 @@ def engineer_stuff_features(df):
 
     # ── Arm angle ──
     arm_angles_path = Path(__file__).parent / 'models' / 'pitcher_arm_angles.json'
-    slot_reg_path = Path(__file__).parent / 'models' / 'slot_regression.json'
+    slot_reg_path   = Path(__file__).parent / 'models' / 'slot_regression.json'
+    heights_path    = Path(__file__).parent / 'models' / 'pitcher_heights.json'
     _arm_angles = {}
     _slot_reg = {}
+    _heights = {}
     if arm_angles_path.exists():
         with open(arm_angles_path) as _f:
             _arm_angles = json.load(_f)
     if slot_reg_path.exists():
         with open(slot_reg_path) as _f:
             _slot_reg = json.load(_f)
+    if heights_path.exists():
+        with open(heights_path) as _f:
+            _heights = json.load(_f)
 
     df['arm_angle_baseline'] = np.nan
     df['arm_angle_std'] = np.nan
@@ -169,6 +174,28 @@ def engineer_stuff_features(df):
     else:
         df['arm_angle'] = df['arm_angle_baseline']
     df = df.drop(columns=['arm_angle_baseline'])
+
+    # ── Geometric arm-angle estimation for WBC/AAA pitchers with no measured value ──
+    # release_pos_x and release_pos_z are present in every Statcast fetch.
+    # Uses cached pitcher height (inches) from pitcher_heights.json; falls back
+    # to the MLB average (74") so WBC/AAA pitchers always get a reasonable estimate.
+    _nan_aa = df['arm_angle'].isna()
+    if _nan_aa.any():
+        _DEFAULT_H = 74.0
+        _rel_x = pd.to_numeric(df.loc[_nan_aa, 'release_pos_x'], errors='coerce').values
+        _rel_z = pd.to_numeric(df.loc[_nan_aa, 'release_pos_z'], errors='coerce').values
+        _throws = df.loc[_nan_aa, 'p_throws'].values if 'p_throws' in df.columns else np.full(_nan_aa.sum(), 'R')
+        _h = np.array([
+            _heights.get(str(int(pid)), _DEFAULT_H) if pd.notna(pid) else _DEFAULT_H
+            for pid in df.loc[_nan_aa, 'pitcher']
+        ], dtype='float32')
+        _shoulder_z = _h * 0.70
+        _adj = (_rel_z * 12.0) - _shoulder_z
+        _opp = np.abs(_rel_x * 12.0)
+        _est = np.degrees(np.arctan2(_opp, _adj))
+        _est = np.where(_throws == 'L', -_est, _est)
+        df.loc[_nan_aa, 'arm_angle'] = _est.astype('float32')
+        df.loc[_nan_aa & df['arm_angle_dev'].isna(), 'arm_angle_dev'] = 0.0
 
     # ── v3 SLOT REGRESSION: per (pitch_type, p_throws) ──
     df['pfx_x_dev_from_slot'] = np.nan
