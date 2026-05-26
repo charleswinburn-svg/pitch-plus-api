@@ -181,7 +181,8 @@ THROWS_CATS     = _tpc[1] if len(_tpc) > 1 else ['L','R']
 STAND_CATS      = ['L','R']
 
 # Rare pitch-type aliases applied before model scoring and norm lookup.
-PITCH_ALIASES = {'FO': 'FS'}
+# Mirrors PITCH_TYPE_REMAP in score_pitches.py.
+PITCH_ALIASES = {'FO': 'FS', 'CS': 'CU', 'SC': 'CH', 'KN': 'FS'}
 
 _GRAVITY = 32.174        # ft/s²
 _Y0_REF  = 50.0          # Statcast kinematic reference y (ft from back of plate)
