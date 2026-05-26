@@ -554,6 +554,19 @@ app.add_middleware(
 class PitchRequest(BaseModel):
     pitches: list[dict]
     is_aaa: bool = False
+    start_date: Optional[str] = None  # "YYYY-MM-DD" — filter pitches carrying a game_date field
+    end_date:   Optional[str] = None
+
+
+def _date_in_range(d, start: Optional[str], end: Optional[str]) -> bool:
+    if not d:
+        return True
+    s = str(d)
+    if start and s < start:
+        return False
+    if end and s > end:
+        return False
+    return True
 
 
 @app.get("/health")
@@ -636,6 +649,15 @@ def score_aggregate(req: PitchRequest):
         if mapped:
             rows.append(mapped)
             pitcher_ids.append(pid)
+
+    if req.start_date or req.end_date:
+        paired = [(r, pid) for r, pid in zip(rows, pitcher_ids)
+                  if _date_in_range(r.get("game_date"), req.start_date, req.end_date)]
+        if paired:
+            rows, pitcher_ids = zip(*paired)
+            rows, pitcher_ids = list(rows), list(pitcher_ids)
+        else:
+            rows, pitcher_ids = [], []
 
     if not rows:
         return {"by_pitch_type": {}, "overall": {"stuff": None, "loc": None, "tun": None, "pitch": None, "n": 0}}
