@@ -623,7 +623,7 @@ def score_aggregate(req: PitchRequest):
 
     for i, s in enumerate(scored):
         pid = pitcher_ids[i]
-        pt = s.get("pitch_type")  # display type (pre-alias)
+        pt = s.get("pitch_type_display", s.get("pitch_type"))  # original pre-alias type
         for b in (cross[pt], per_pid[pid][pt]):
             b["stuff"] += s.get("xRV_stuff",    0.0)
             b["loc"]   += s.get("xRV_location", 0.0)
