@@ -603,6 +603,8 @@ def _per_type_plus_agg(xrv_mean: float, pitch_type: str, kind: str):
 
     Identical formula to score_pitches.py write_season_aggregates() so that
     /score_aggregate on a full season matches /leaderboard exactly.
+    Stuff+ is additionally rescaled to global mean=100, stdev=10 using the
+    season params stored in pitch_plus_norm['_stuff_plus_rescale'].
     """
     n = pitch_plus_norm.get(pitch_type)
     if not n:
@@ -612,7 +614,12 @@ def _per_type_plus_agg(xrv_mean: float, pitch_type: str, kind: str):
     if std_key not in n or n[std_key] <= 0:
         return None
     z = max(-4.0, min(4.0, (xrv_mean - n[mean_key]) / n[std_key]))
-    return round(100.0 - z * 10.0, 1)
+    raw = 100.0 - z * 10.0
+    if kind == 'stuff':
+        r = pitch_plus_norm.get('_stuff_plus_rescale', {})
+        if isinstance(r, dict) and r.get('stdev', 0) > 0:
+            raw = 100.0 + (raw - r['mean']) / r['stdev'] * 10.0
+    return round(raw, 1)
 
 
 def _weighted_overall_agg(by_pt: dict) -> dict:
