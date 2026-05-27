@@ -47,21 +47,23 @@ PITCH_NAMES = {
 PT_ORDER = ["FF", "SI", "FC", "SL", "ST", "CU", "KC", "CH", "FS", "SV", "FO", "CS", "KN", "SC", "EP"]
 
 PITCH_COLORS = {
-    "FF": "#ef4444",
-    "SI": "#f97316",
-    "FC": "#eab308",
-    "SL": "#84cc16",
-    "ST": "#22c55e",
-    "SV": "#14b8a6",
-    "CU": "#3b82f6",
-    "KC": "#6366f1",
-    "CS": "#a855f7",
-    "CH": "#ec4899",
-    "SC": "#f43f5e",
-    "FS": "#0ea5e9",
-    "FO": "#f59e0b",
-    "KN": "#64748b",
-    "EP": "#78716c",
+    "FF": "#D22D49",
+    "SI": "#FE9D00",
+    "FC": "#933F2C",
+    "SL": "#EEE716",
+    "CU": "#00D1ED",
+    "CH": "#1DBE3A",
+    "FS": "#3BACAC",
+    "ST": "#DDB33A",
+    "KC": "#6236CD",
+    "CS": "#0068FF",
+    "SV": "#93AFD4",
+    "KN": "#3C44CD",
+    "SC": "#60DB33",
+    "FO": "#98DDB1",
+    "EP": "#999999",
+    "FA": "#D22D49",
+    "GY": "#FFFF99",
 }
 
 BG_DARK  = "#111827"
