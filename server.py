@@ -945,7 +945,8 @@ def _fetch_savant_bat_tracking(player_id: int, season: int, start: str, end: str
         if not r.ok or len(r.text) < 50:
             return None
         df = pd.read_csv(io.StringIO(r.text))
-        pid_col = next((c for c in df.columns if c.lower() in ("player_id", "batter", "mlbamid", "xmlbamid")), None)
+        # Savant's bat-tracking leaderboard CSV names the player-id column "id"
+        pid_col = next((c for c in df.columns if c.lower() in ("id", "player_id", "batter", "mlbamid", "xmlbamid")), None)
         if pid_col is None:
             return None
         row = df[pd.to_numeric(df[pid_col], errors="coerce") == player_id]
