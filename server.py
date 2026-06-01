@@ -12,6 +12,7 @@ GET /health → {"status": "ok"}
 """
 import json
 import math
+import io
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +23,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any, Optional
+
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
 
 ROOT = Path(__file__).parent
 MODELS_DIR = ROOT / "models"
@@ -844,3 +851,329 @@ def leaderboard(season: int = 2026):
     if season < 2015 or season > 2100:
         raise HTTPException(status_code=400, detail=f"season out of range: {season}")
     return _build_leaderboard(season)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /player_stats/{player_id} — date-range stats for hitter/pitcher cards
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FG_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json,*/*",
+    "Referer": "https://www.fangraphs.com/",
+}
+_SAVANT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept": "text/csv,*/*",
+}
+
+# iSwing+ lazy state
+ISWING_DIR = Path(os.environ.get("ISWING_MODELS_DIR", str(ROOT.parent)))
+_iswing_loaded: bool = False
+_iswing_models = None  # (model_a, model_b, scaler_a, scaler_b, config) or None
+_iswing_norm: dict = {}  # {year: {log_mean, log_std}}
+
+_SWING_DESCS = {
+    'hit_into_play', 'swinging_strike', 'swinging_strike_blocked',
+    'foul', 'foul_tip', 'foul_bunt', 'missed_bunt', 'bunt_foul_tip',
+    'hit_into_play_no_out', 'hit_into_play_score',
+}
+
+
+def _fetch_fg_rows(url: str) -> list:
+    """Fetch FanGraphs API data rows, trying requests then cloudscraper."""
+    if not _HAS_REQUESTS:
+        return []
+    try:
+        r = _requests.get(url, headers=_FG_HEADERS, timeout=30)
+        if r.status_code == 200:
+            return r.json().get("data", [])
+    except Exception:
+        pass
+    try:
+        import cloudscraper
+        r = cloudscraper.create_scraper().get(url, headers=_FG_HEADERS, timeout=30)
+        if r.status_code == 200:
+            return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+
+def _fg_find_player(df: pd.DataFrame, player_id: int) -> Optional[pd.Series]:
+    mlbam_col = next((c for c in df.columns if c.lower() in ("xmlbamid", "mlbamid")), None)
+    if mlbam_col is None:
+        return None
+    matches = df[pd.to_numeric(df[mlbam_col], errors="coerce") == player_id]
+    return matches.iloc[0] if not matches.empty else None
+
+
+def _fetch_fg_siera(player_id: int, season: int, start: str, end: str) -> Optional[float]:
+    url = (
+        "https://www.fangraphs.com/api/leaders/major-league/data"
+        f"?pos=all&stats=pit&lg=all&qual=1&type=8"
+        f"&season={season}&month=0&season1={season}&ind=0"
+        f"&team=0&rost=0&age=0&filter=&players=0"
+        f"&startdate={start}&enddate={end}&pageitems=2000&page=1"
+    )
+    rows = _fetch_fg_rows(url)
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    row = _fg_find_player(df, player_id)
+    if row is None:
+        return None
+    siera_col = next((c for c in df.columns if c.upper() == "SIERA"), None)
+    if siera_col is None:
+        return None
+    val = pd.to_numeric(row.get(siera_col), errors="coerce")
+    return float(val) if not pd.isna(val) else None
+
+
+def _fetch_savant_bat_tracking(player_id: int, season: int, start: str, end: str) -> Optional[float]:
+    """Return Blasts/Contact% (0–100) from Savant bat tracking leaderboard."""
+    if not _HAS_REQUESTS:
+        return None
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/bat-tracking"
+        f"?attackZone=&batSide=&contactType=&count="
+        f"&dateStart={start}&dateEnd={end}"
+        f"&minSwings=0&type=details&csv=true"
+    )
+    try:
+        r = _requests.get(url, headers=_SAVANT_HEADERS, timeout=60)
+        if not r.ok or len(r.text) < 50:
+            return None
+        df = pd.read_csv(io.StringIO(r.text))
+        pid_col = next((c for c in df.columns if c.lower() in ("player_id", "batter", "mlbamid", "xmlbamid")), None)
+        if pid_col is None:
+            return None
+        row = df[pd.to_numeric(df[pid_col], errors="coerce") == player_id]
+        if row.empty:
+            return None
+        blast_col = next((c for c in df.columns if "blast" in c.lower()), None)
+        if blast_col is None:
+            return None
+        val = pd.to_numeric(row.iloc[0][blast_col], errors="coerce")
+        if pd.isna(val):
+            return None
+        # Savant stores as decimal (0.083); return as percentage (8.3)
+        return float(val) * 100 if val <= 1.0 else float(val)
+    except Exception:
+        return None
+
+
+def _iswing_enrich(df: pd.DataFrame) -> pd.DataFrame:
+    """Add derived features required by the iSwing+ model (mirrors iswing_update.py)."""
+    if "attack_angle" in df.columns:
+        df["ideal_attack_angle"] = df["attack_angle"].between(5, 20).fillna(False).astype(int)
+
+    CONTACT = {"hit_into_play", "foul", "hit_into_play_no_out", "hit_into_play_score", "foul_bunt"}
+    df["made_contact"] = df["description"].isin(CONTACT).astype(int)
+
+    if all(c in df.columns for c in ["plate_x", "plate_z", "sz_top", "sz_bot"]):
+        df["in_zone"] = (
+            (df["plate_x"].abs() <= 0.83) &
+            (df["plate_z"] >= df["sz_bot"]) &
+            (df["plate_z"] <= df["sz_top"])
+        ).fillna(False).astype(int)
+    elif all(c in df.columns for c in ["plate_x", "plate_z"]):
+        df["in_zone"] = (
+            (df["plate_x"].abs() <= 0.83) & df["plate_z"].between(1.5, 3.5)
+        ).fillna(False).astype(int)
+
+    if all(c in df.columns for c in ["plate_x", "plate_z"]):
+        df["location_difficulty"] = np.sqrt(df["plate_x"]**2 + (df["plate_z"] - 2.5)**2)
+
+    pitch_families = {
+        "FF":"fastball","SI":"fastball","FC":"fastball","FA":"fastball",
+        "SL":"breaking","CU":"breaking","KC":"breaking","SV":"breaking","CS":"breaking","ST":"breaking",
+        "CH":"offspeed","FS":"offspeed","FO":"offspeed","SC":"offspeed","KN":"offspeed","EP":"offspeed",
+    }
+    if "pitch_type" in df.columns:
+        pf = df["pitch_type"].map(pitch_families).fillna("other")
+        df["is_fastball"] = (pf == "fastball").astype(int)
+        df["is_breaking"] = (pf == "breaking").astype(int)
+        df["is_offspeed"] = (pf == "offspeed").astype(int)
+
+    if all(c in df.columns for c in ["pfx_x", "pfx_z"]):
+        df["total_movement"] = np.sqrt(df["pfx_x"]**2 + df["pfx_z"]**2)
+    if all(c in df.columns for c in ["balls", "strikes"]):
+        df["count_leverage"] = df["balls"] - df["strikes"]
+    if all(c in df.columns for c in ["attack_direction", "plate_x"]):
+        df["directional_match"] = -df["attack_direction"] * df["plate_x"]
+    if all(c in df.columns for c in ["bat_speed", "release_speed"]):
+        df["speed_differential"] = df["bat_speed"] - (df["release_speed"] * 0.7)
+
+    if all(c in df.columns for c in ["bat_speed", "plate_x"]):
+        df["plate_x_bin"] = pd.cut(df["plate_x"], bins=20, labels=False)
+        exp_speed = df.groupby("plate_x_bin")["bat_speed"].transform("mean")
+        df["speed_over_expected"] = (df["bat_speed"] - exp_speed).fillna(0)
+        df.drop(columns=["plate_x_bin"], inplace=True)
+
+    if all(c in df.columns for c in ["bat_speed", "location_difficulty"]):
+        df["speed_vs_location"] = df["bat_speed"] * (1 + 0.3 * df["location_difficulty"])
+
+    if all(c in df.columns for c in ["launch_speed", "bat_speed", "release_speed"]):
+        df["theoretical_max_ev"] = 1.23 * df["bat_speed"] + 0.23 * df["release_speed"]
+        df["squared_up_rate"] = df["launch_speed"] / df["theoretical_max_ev"].replace(0, np.nan)
+
+    if "estimated_woba_using_speedangle" in df.columns:
+        contact_mask = df["launch_speed"].notna() & df["launch_angle"].notna()
+        df["xwOBAcon"] = np.where(contact_mask, df["estimated_woba_using_speedangle"], np.nan)
+
+    return df
+
+
+def _iswing_score_df(df: pd.DataFrame, model_a, model_b, scaler_a, scaler_b, config) -> pd.DataFrame:
+    feat_a = config["features_a"]
+    feat_b = config["features_b"]
+    meds_a = config["feature_medians_a"]
+    meds_b = config["feature_medians_b"]
+    avail_a = [f for f in feat_a if f in df.columns]
+    avail_b = [f for f in feat_b if f in df.columns]
+    Xa = df[avail_a].copy()
+    Xb = df[avail_b].copy()
+    for c in Xa.columns: Xa[c] = Xa[c].fillna(meds_a.get(c, Xa[c].median()))
+    for c in Xb.columns: Xb[c] = Xb[c].fillna(meds_b.get(c, Xb[c].median()))
+    Xa_sc = pd.DataFrame(scaler_a.transform(Xa), columns=avail_a, index=df.index)
+    Xb_sc = pd.DataFrame(scaler_b.transform(Xb), columns=avail_b, index=df.index)
+    q_exp = config.get("quality_exponent", 1.5)
+    c_exp = config.get("contact_exponent", 0.3)
+    df = df.copy()
+    df["pred_quality"] = np.maximum(model_a.predict(Xa_sc), 0.001)
+    df["contact_prob"] = np.maximum(model_b.predict_proba(Xb_sc)[:, 1], 0.001)
+    df["raw_value"] = df["pred_quality"]**q_exp * df["contact_prob"]**c_exp
+    return df
+
+
+def _ensure_iswing():
+    """Lazy-load iSwing+ models and precompute year-level normalization."""
+    global _iswing_loaded, _iswing_models, _iswing_norm
+    if _iswing_loaded:
+        return
+    _iswing_loaded = True
+    try:
+        import joblib
+        model_a  = joblib.load(str(ISWING_DIR / "iswing_model_a.pkl"))
+        model_b  = joblib.load(str(ISWING_DIR / "iswing_model_b.pkl"))
+        scaler_a = joblib.load(str(ISWING_DIR / "iswing_scaler_a.pkl"))
+        scaler_b = joblib.load(str(ISWING_DIR / "iswing_scaler_b.pkl"))
+        with open(str(ISWING_DIR / "iswing_config.json")) as f:
+            config = json.load(f)
+        _iswing_models = (model_a, model_b, scaler_a, scaler_b, config)
+        print(f"Loaded iSwing+ models from {ISWING_DIR}")
+
+        # Precompute per-year normalization params from full swings CSV
+        csv_path = ISWING_DIR / "competitive_swings_2023_2026.csv"
+        if csv_path.exists():
+            try:
+                raw = pd.read_csv(str(csv_path))
+                raw = _iswing_enrich(raw)
+                raw = raw.dropna(subset=["bat_speed"])
+                raw = _iswing_score_df(raw, *_iswing_models)
+                raw["year"] = pd.to_datetime(raw["game_date"], errors="coerce").dt.year
+                for yr in raw["year"].dropna().unique():
+                    yr = int(yr)
+                    yr_agg = raw[raw["year"] == yr].groupby("batter")["raw_value"].mean()
+                    if len(yr_agg) < 10:
+                        continue
+                    log_vals = np.log(yr_agg.clip(lower=1e-10))
+                    _iswing_norm[yr] = {"log_mean": float(log_vals.mean()), "log_std": float(log_vals.std())}
+                print(f"iSwing+ norms computed for years: {list(_iswing_norm.keys())}")
+            except Exception as e:
+                print(f"iSwing+ norm precompute failed: {e}")
+    except Exception as e:
+        print(f"iSwing+ models unavailable: {e}")
+
+
+def _score_iswing_daterange(player_id: int, season: int, start: str, end: str) -> Optional[float]:
+    """Score a player's iSwing+ for a date range and return the normalized 100-scale value."""
+    _ensure_iswing()
+    if _iswing_models is None or not _HAS_REQUESTS:
+        return None
+
+    url = (
+        f"https://baseballsavant.mlb.com/statcast_search/csv"
+        f"?all=true&type=details&hfSea={season}%7C&hfGT=R%7C"
+        f"&player_type=batter&batters_lookup%5B%5D={player_id}"
+    )
+    if start:
+        url += f"&start_date={start}"
+    if end:
+        url += f"&end_date={end}"
+
+    try:
+        r = _requests.get(url, headers=_SAVANT_HEADERS, timeout=60)
+        if not r.ok or len(r.text) < 100:
+            return None
+        df = pd.read_csv(io.StringIO(r.text))
+        if "description" not in df.columns or "bat_speed" not in df.columns:
+            return None
+        df = df[df["description"].isin(_SWING_DESCS)].copy()
+        df = df.dropna(subset=["bat_speed"])
+        if len(df) < 5:
+            return None
+
+        # Filter to competitive swings (per-batter 10th percentile threshold)
+        thresh = df["bat_speed"].quantile(0.10)
+        df = df[(df["bat_speed"] >= thresh) | ((df["bat_speed"] >= 60) & (df.get("launch_speed", pd.Series(dtype=float)) >= 90))]
+        if len(df) < 5:
+            return None
+
+        df = _iswing_enrich(df)
+        df = _iswing_score_df(df, *_iswing_models)
+
+        mean_raw = float(df["raw_value"].mean())
+        norm = _iswing_norm.get(season)
+        if norm is None:
+            # Fall back to current year if available, else skip
+            norm = next(iter(_iswing_norm.values()), None) if _iswing_norm else None
+        if norm is None:
+            return None
+
+        log_mean = norm["log_mean"]
+        log_std  = norm["log_std"]
+        if log_std <= 0:
+            return None
+        score = 100.0 + 15.0 * (np.log(max(mean_raw, 1e-10)) - log_mean) / log_std
+        return round(float(score), 1)
+    except Exception as e:
+        print(f"iSwing+ scoring error for {player_id}: {e}")
+        return None
+
+
+@app.get("/player_stats/{player_id}")
+def player_stats(
+    player_id: int,
+    season: int = 2026,
+    start: str = "",
+    end: str = "",
+    group: str = "hitting",
+):
+    """
+    Return date-range stats for a hitter or pitcher card.
+
+    Provides stats that can't be computed client-side:
+    - hitting: Blasts/Contact (Savant bat tracking), iSwing+ (ML model)
+    - pitching: SIERA (FanGraphs type=8)
+
+    Returns partial data (HTTP 200) if some sources fail.
+    """
+    stats: dict = {}
+
+    if group == "pitching":
+        siera = _fetch_fg_siera(player_id, season, start, end)
+        if siera is not None:
+            stats["SIERA"] = siera
+
+    else:  # hitting
+        blasts = _fetch_savant_bat_tracking(player_id, season, start, end)
+        if blasts is not None:
+            stats["Blasts/Contact"] = round(blasts, 1)
+
+        iswing = _score_iswing_daterange(player_id, season, start, end)
+        if iswing is not None:
+            stats["iSwing+"] = iswing
+
+    return {"stats": stats}
