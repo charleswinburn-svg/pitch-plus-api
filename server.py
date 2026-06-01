@@ -1074,12 +1074,19 @@ def _ensure_iswing():
                 raw = raw.dropna(subset=["bat_speed"])
                 raw = _iswing_score_df(raw, *_iswing_models)
                 raw["year"] = pd.to_datetime(raw["game_date"], errors="coerce").dt.year
+                current_year = pd.Timestamp.now().year
                 for yr in raw["year"].dropna().unique():
                     yr = int(yr)
-                    yr_agg = raw[raw["year"] == yr].groupby("batter")["raw_value"].mean()
-                    if len(yr_agg) < 10:
+                    # Match iswing_update.py.build_json: only players with enough
+                    # swings define the year's distribution (25 for the current
+                    # season, 75 otherwise). Including low-swing batters skews
+                    # log_mean/log_std and compresses date-range scores toward 100.
+                    mn = 25 if yr == current_year else 75
+                    agg = raw[raw["year"] == yr].groupby("batter")["raw_value"].agg(["mean", "count"])
+                    agg = agg[agg["count"] >= mn]
+                    if len(agg) < 10:
                         continue
-                    log_vals = np.log(yr_agg.clip(lower=1e-10))
+                    log_vals = np.log(agg["mean"].clip(lower=1e-10))
                     _iswing_norm[yr] = {"log_mean": float(log_vals.mean()), "log_std": float(log_vals.std())}
                 print(f"iSwing+ norms computed for years: {list(_iswing_norm.keys())}")
             except Exception as e:
