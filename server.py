@@ -872,6 +872,7 @@ ISWING_DIR = Path(os.environ.get("ISWING_MODELS_DIR", str(ROOT.parent)))
 _iswing_loaded: bool = False
 _iswing_models = None  # (model_a, model_b, scaler_a, scaler_b, config) or None
 _iswing_norm: dict = {}  # {year: {log_mean, log_std}}
+_iswing_soe_ref = None  # league reference for speed_over_expected: {edges, means}
 
 _SWING_DESCS = {
     'hit_into_play', 'swinging_strike', 'swinging_strike_blocked',
@@ -1007,10 +1008,31 @@ def _iswing_enrich(df: pd.DataFrame) -> pd.DataFrame:
         df["speed_differential"] = df["bat_speed"] - (df["release_speed"] * 0.7)
 
     if all(c in df.columns for c in ["bat_speed", "plate_x"]):
-        df["plate_x_bin"] = pd.cut(df["plate_x"], bins=20, labels=False)
-        exp_speed = df.groupby("plate_x_bin")["bat_speed"].transform("mean")
-        df["speed_over_expected"] = (df["bat_speed"] - exp_speed).fillna(0)
-        df.drop(columns=["plate_x_bin"], inplace=True)
+        global _iswing_soe_ref
+        if _iswing_soe_ref is None:
+            # Full-population pass (the swings CSV at startup): expected bat speed
+            # per plate_x bin is the LEAGUE mean. Capture the bin edges and per-bin
+            # means so single-player subsets can be scored on the same basis.
+            binned, edges = pd.cut(df["plate_x"], bins=20, labels=False, retbins=True)
+            df["plate_x_bin"] = binned
+            exp_speed = df.groupby("plate_x_bin")["bat_speed"].transform("mean")
+            df["speed_over_expected"] = (df["bat_speed"] - exp_speed).fillna(0)
+            means = df.groupby("plate_x_bin")["bat_speed"].mean()
+            _iswing_soe_ref = {
+                "edges": edges,
+                "means": {int(k): float(v) for k, v in means.items() if pd.notna(k)},
+            }
+            df.drop(columns=["plate_x_bin"], inplace=True)
+        else:
+            # Subset pass (a single hitter over a date range): keep
+            # speed_over_expected LEAGUE-relative via the captured reference,
+            # otherwise a fast hitter's value collapses toward zero and the model
+            # under-rates the swings — the date-range score reads low.
+            edges = _iswing_soe_ref["edges"]
+            means = _iswing_soe_ref["means"]
+            binned = pd.cut(df["plate_x"], bins=edges, labels=False, include_lowest=True)
+            exp_speed = binned.map(lambda b: means.get(int(b)) if pd.notna(b) else None)
+            df["speed_over_expected"] = (df["bat_speed"] - pd.to_numeric(exp_speed, errors="coerce")).fillna(0)
 
     if all(c in df.columns for c in ["bat_speed", "location_difficulty"]):
         df["speed_vs_location"] = df["bat_speed"] * (1 + 0.3 * df["location_difficulty"])
