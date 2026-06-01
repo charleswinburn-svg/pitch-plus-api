@@ -881,19 +881,66 @@ _SWING_DESCS = {
 }
 
 
+# FanGraphs blocks datacenter IPs at Cloudflare, so a browser cookie export is
+# the reliable path (same approach baseball_pipeline.py uses). Drop a Netscape-
+# format cookies file at one of these paths, or set FANGRAPHS_COOKIES.
+_FG_COOKIE_PATHS = [
+    os.environ.get("FANGRAPHS_COOKIES", ""),
+    str(ROOT / "fangraphs_cookies.txt"),
+    str(ISWING_DIR / "fangraphs_cookies.txt"),
+    "/var/www/pasttheeyetest.com/fangraphs_cookies.txt",
+    os.path.expanduser("~/fangraphs_cookies.txt"),
+]
+
+
+def _fg_cookie_session():
+    """requests.Session loaded with the first available FanGraphs cookie file."""
+    for cp in _FG_COOKIE_PATHS:
+        if not cp or not os.path.exists(cp):
+            continue
+        try:
+            from http.cookiejar import MozillaCookieJar
+            jar = MozillaCookieJar(cp)
+            jar.load(ignore_discard=True, ignore_expires=True)
+            s = _requests.Session()
+            s.cookies = jar
+            s.headers.update(_FG_HEADERS)
+            return s, os.path.basename(cp)
+        except Exception as e:
+            print(f"FanGraphs cookie load failed ({cp}): {e}")
+    return None, None
+
+
 def _fetch_fg_rows(url: str) -> list:
-    """Fetch FanGraphs API data rows, trying requests then cloudscraper."""
+    """Fetch FanGraphs API rows: cookie session, then cloudscraper, then plain."""
     if not _HAS_REQUESTS:
         return []
-    try:
-        r = _requests.get(url, headers=_FG_HEADERS, timeout=30)
-        if r.status_code == 200:
-            return r.json().get("data", [])
-    except Exception:
-        pass
+    # 1. Cookie-authenticated session (most reliable past Cloudflare)
+    sess, src = _fg_cookie_session()
+    if sess is not None:
+        try:
+            r = sess.get(url, timeout=30)
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                if data:
+                    return data
+            else:
+                print(f"FanGraphs cookies ({src}) returned {r.status_code}")
+        except Exception as e:
+            print(f"FanGraphs cookie fetch failed: {e}")
+    # 2. cloudscraper
     try:
         import cloudscraper
         r = cloudscraper.create_scraper().get(url, headers=_FG_HEADERS, timeout=30)
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            if data:
+                return data
+    except Exception:
+        pass
+    # 3. Plain requests
+    try:
+        r = _requests.get(url, headers=_FG_HEADERS, timeout=30)
         if r.status_code == 200:
             return r.json().get("data", [])
     except Exception:
@@ -910,10 +957,14 @@ def _fg_find_player(df: pd.DataFrame, player_id: int) -> Optional[pd.Series]:
 
 
 def _fetch_fg_siera(player_id: int, season: int, start: str, end: str) -> Optional[float]:
+    # month=1000 activates FanGraphs' custom date-range filter (startdate/enddate);
+    # month=0 is the full season, used when no window is given. qual=0 so the
+    # pitcher isn't filtered out over a short window (we look him up by id).
+    month = 1000 if (start or end) else 0
     url = (
         "https://www.fangraphs.com/api/leaders/major-league/data"
-        f"?pos=all&stats=pit&lg=all&qual=1&type=8"
-        f"&season={season}&month=0&season1={season}&ind=0"
+        f"?pos=all&stats=pit&lg=all&qual=0&type=8"
+        f"&season={season}&month={month}&season1={season}&ind=0"
         f"&team=0&rost=0&age=0&filter=&players=0"
         f"&startdate={start}&enddate={end}&pageitems=2000&page=1"
     )
