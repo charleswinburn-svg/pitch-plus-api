@@ -104,8 +104,8 @@ fi
 # ── Step 3: Build team plots ──────────────────────────────────────────────────
 echo ""
 echo "=== Step 3: Building team plots for ${YEAR} ==="
-# Run from FRONTEND_DIR so build_team_plus.py imports the local score_pitches.py
-(cd "$FRONTEND_DIR" && python3 build_team_plus.py --year "$YEAR" --parquet "$PARQUET")
+# PYTHONPATH=API_DIR so build_team_plus.py imports the v3.4 score_pitches.py
+(cd "$FRONTEND_DIR" && PYTHONPATH="$API_DIR:${PYTHONPATH:-}" python3 build_team_plus.py --year "$YEAR" --parquet "$PARQUET")
 
 echo "  Team plots  : $FRONTEND_DIR/public/team_plus_${YEAR}.json"
 
