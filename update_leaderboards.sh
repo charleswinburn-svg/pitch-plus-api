@@ -76,13 +76,12 @@ fi
 # ── Step 1: Score pitches → update pitcher leaderboard ───────────────────────
 echo ""
 echo "=== Step 1: Scoring pitches for ${YEAR} ==="
-# Use the frontend's score_pitches.py — it matches the models on this server
-(cd "$FRONTEND_DIR" && python3 score_pitches.py \
+python3 "$API_DIR/score_pitches.py" \
     --input    "$PARQUET" \
     --models   "$MODELS_DIR" \
     --config   "$CONFIG" \
     --output-dir "$API_DIR" \
-    --season   "$YEAR")
+    --season   "$YEAR"
 
 echo "  Leaderboard : $API_DIR/season/pitcher_grades_${YEAR}.json"
 echo "  Pitch types : $API_DIR/season/pitcher_pitch_type_grades_${YEAR}.json"
