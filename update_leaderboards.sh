@@ -20,7 +20,11 @@ set -euo pipefail
 # ── Configurable paths ────────────────────────────────────────────────────────
 API_DIR=/var/www/pitch-plus-api
 FRONTEND_DIR=/var/www/pasttheeyetest.com
-MODELS_DIR=$FRONTEND_DIR/models
+# Score against the API's OWN models dir so the leaderboard build and the running
+# server share one pitch_plus_norm.json (incl. _stuff_plus_rescale). Otherwise the
+# leaderboard rescales Stuff+ to mean=100 while live /score_aggregate reads an
+# un-rescaled API copy → live grades come out systematically lower.
+MODELS_DIR=$API_DIR/models
 CONFIG=$MODELS_DIR/final_model_config.json
 # ─────────────────────────────────────────────────────────────────────────────
 
