@@ -120,6 +120,11 @@ else:
     slot_regression = {}
     print("No slot_regression.json — pfx_*_dev_from_slot will use pitcher mean fallback")
 
+# Sign that maps Statcast pfx_x → the MLB Stats API breakHorizontal convention used by
+# the frontend Movement Plot (positive = plotted to the right). Calibrated visually against
+# known pitchers; flip if the /expected_movement overlay lands mirrored vs real clusters.
+EXPECTED_MOVE_H_SIGN = 1.0
+
 # Per-pitch-type Pitch+ league mean/std (computed from 2025 season aggregates)
 with open(MODELS_DIR / "pitch_plus_norm.json") as f:
     pitch_plus_norm = json.load(f)  # {pt: {mean, std, stuff_mean, stuff_std, ...}}
@@ -798,6 +803,57 @@ def pitcher_grades_distribution(season: int = 2026):
     return {
         "season": season,
         "grades": pitcher_grades[season],
+    }
+
+
+@app.get("/expected_movement/{pitcher_id}")
+def expected_movement(pitcher_id: int, season: int = 2026, hand: str = "R"):
+    """
+    Expected induced break per pitch type for a pitcher's arm angle.
+
+    Drives the Movement Plot's "Expected movement" overlay: for each pitch type the
+    slot regression predicts where the pitch *should* break given the pitcher's arm
+    angle. Returned in the frontend plot's convention — inches, breakHorizontal (x)
+    and breakVerticalInduced (y) — so the client just draws circles at (hBreak, vBreak).
+
+    Slot coefficients are in Statcast pfx space (feet, handedness-corrected arm-side
+    break for x). Conversion: un-correct handedness → raw pfx_x, ×12 → inches, ×H_SIGN
+    to match breakHorizontal; vertical is pfx_z×12 (induced vertical break, same sign).
+
+    Returns arm_angle=None + empty pitch_types when the pitcher has no baseline arm
+    angle (e.g. AAA/prospects) so the overlay simply shows nothing.
+    """
+    aa = pitcher_arm_angles.get(str(pitcher_id))
+    if not aa or aa.get("arm_angle") is None:
+        return {"pitcher_id": pitcher_id, "arm_angle": None, "hand": hand, "pitch_types": {}}
+
+    arm = float(aa["arm_angle"])
+    hand = "L" if str(hand).upper().startswith("L") else "R"
+    hand_sign = -1.0 if hand == "L" else 1.0
+    slot = slot_regression.get("slot", slot_regression) or {}
+
+    out = {}
+    for key, c in slot.items():
+        try:
+            pt, h = key.rsplit("_", 1)
+        except ValueError:
+            continue
+        if h != hand or not isinstance(c, dict) or "slope_x" not in c:
+            continue
+        exp_arm_side = c["slope_x"] * arm + c["intercept_x"]   # ft, arm-side-corrected
+        exp_pfx_z    = c["slope_z"] * arm + c["intercept_z"]   # ft
+        exp_pfx_x    = exp_arm_side * hand_sign                # ft, raw Statcast pfx_x
+        out[pt] = {
+            "hBreak": round(exp_pfx_x * 12.0 * EXPECTED_MOVE_H_SIGN, 1),  # inches, plot convention
+            "vBreak": round(exp_pfx_z * 12.0, 1),                         # inches (IVB == pfx_z*12)
+        }
+
+    return {
+        "pitcher_id": pitcher_id,
+        "arm_angle": round(arm, 1),
+        "arm_angle_source": aa.get("_source"),
+        "hand": hand,
+        "pitch_types": out,
     }
 
 
