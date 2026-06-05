@@ -47,10 +47,28 @@ if [[ -z "$PARQUET" ]]; then
     PARQUET="$FRONTEND_DIR/pitch_xrv_${YEAR}.parquet"
 fi
 
+# ── Resolve Python interpreter (prefer a project venv with lightgbm/pandas) ───
+if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python3" ]]; then
+    PY="$VIRTUAL_ENV/bin/python3"
+else
+    PY=""
+    for cand in "$API_DIR/.venv/bin/python3" "$API_DIR/venv/bin/python3" \
+                "$FRONTEND_DIR/.venv/bin/python3" "$FRONTEND_DIR/venv/bin/python3"; do
+        if [[ -x "$cand" ]]; then PY="$cand"; break; fi
+    done
+    [[ -z "$PY" ]] && PY="python3"
+fi
+echo "Using Python: $PY"
+if ! "$PY" -c "import lightgbm" 2>/dev/null; then
+    echo "ERROR: lightgbm not available in $PY." >&2
+    echo "       Activate the venv (source .venv/bin/activate) or install deps." >&2
+    exit 1
+fi
+
 # ── Step 0: Fetch Statcast if needed ─────────────────────────────────────────
 if [[ ! -f "$PARQUET" ]] || [[ "$FETCH" -eq 1 ]]; then
     echo "=== Fetching Statcast ${YEAR} ==="
-    python3 - <<PYEOF
+    "$PY" - <<PYEOF
 import sys
 try:
     from pybaseball import statcast
@@ -80,7 +98,7 @@ fi
 # ── Step 1: Score pitches → update pitcher leaderboard ───────────────────────
 echo ""
 echo "=== Step 1: Scoring pitches for ${YEAR} ==="
-python3 "$API_DIR/score_pitches.py" \
+"$PY" "$API_DIR/score_pitches.py" \
     --input    "$PARQUET" \
     --models   "$MODELS_DIR" \
     --config   "$CONFIG" \
@@ -109,7 +127,7 @@ fi
 echo ""
 echo "=== Step 3: Building team plots for ${YEAR} ==="
 # PYTHONPATH=API_DIR so build_team_plus.py imports the v3.4 score_pitches.py
-(cd "$FRONTEND_DIR" && PYTHONPATH="$API_DIR:${PYTHONPATH:-}" python3 build_team_plus.py --year "$YEAR" --parquet "$PARQUET")
+(cd "$FRONTEND_DIR" && PYTHONPATH="$API_DIR:${PYTHONPATH:-}" "$PY" build_team_plus.py --year "$YEAR" --parquet "$PARQUET")
 
 echo "  Team plots  : $FRONTEND_DIR/public/team_plus_${YEAR}.json"
 
