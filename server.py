@@ -123,7 +123,7 @@ else:
 # Sign that maps Statcast pfx_x → the MLB Stats API breakHorizontal convention used by
 # the frontend Movement Plot (positive = plotted to the right). Calibrated visually against
 # known pitchers; flip if the /expected_movement overlay lands mirrored vs real clusters.
-EXPECTED_MOVE_H_SIGN = 1.0
+EXPECTED_MOVE_H_SIGN = -1.0
 
 # Per-pitch-type Pitch+ league mean/std (computed from 2025 season aggregates)
 with open(MODELS_DIR / "pitch_plus_norm.json") as f:
