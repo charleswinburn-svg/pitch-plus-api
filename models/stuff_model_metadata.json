@@ -1,5 +1,6 @@
 {
-  "config": "v3.4-split-fb-vs-offspeed",
+  "config": "v3.5-platoon-split-4model",
+  "architecture": "4 sub-models split by pitch family (FB/offspeed) \u00d7 platoon (same/oppo). No same_side feature \u2014 handedness encoded in the model routing.",
   "target_year": 2025,
   "train_years": [
     2022,
@@ -17,56 +18,105 @@
     "min_pitches_for_baseline": 10,
     "note": "Per pitcher-season, identify the fastball type (FF/SI/FC) with highest average velocity. Any pitch within 4 mph of that average joins the fastball family, regardless of pitch_type label."
   },
-  "fb_model": {
-    "file": "stuff_model_fb_2025.txt",
-    "features": [
-      "release_speed",
-      "pfx_x",
-      "pfx_z",
-      "release_spin_rate",
-      "release_extension",
-      "release_pos_x",
-      "release_pos_z",
-      "arm_angle",
-      "pfx_x_dev_from_slot",
-      "pfx_z_dev_from_slot",
-      "ay_residual",
-      "same_side"
-    ],
-    "n_train_pitches": 990457,
-    "n_trees": 47,
-    "cv_rmse": 0.1772442763760029,
-    "cv_r2": 0.0018113834272450724,
-    "holdout_r2": 0.001817795323502236
-  },
-  "offspeed_model": {
-    "file": "stuff_model_offspeed_2025.txt",
-    "features": [
-      "release_speed",
-      "pfx_x",
-      "pfx_z",
-      "release_spin_rate",
-      "spin_axis_sin",
-      "spin_axis_cos",
-      "spin_efficiency",
-      "fb_velo",
-      "delta_velo",
-      "arm_angle",
-      "pfx_x_dev_from_slot",
-      "pfx_z_dev_from_slot",
-      "ay_residual",
-      "same_side"
-    ],
-    "n_train_pitches": 904958,
-    "n_trees": 49,
-    "cv_rmse": 0.17146860441660938,
-    "cv_r2": 0.0011028377214230556,
-    "holdout_r2": 0.0010874915879903746
+  "platoon_definition": "same_side = 1 if pitcher and batter share handedness",
+  "sub_models": {
+    "FB\u00b7same": {
+      "file": "stuff_model_fb_same_2025.txt",
+      "features": [
+        "release_speed",
+        "pfx_x",
+        "pfx_z",
+        "release_spin_rate",
+        "release_extension",
+        "release_pos_x",
+        "release_pos_z",
+        "arm_angle",
+        "pfx_x_dev_from_slot",
+        "pfx_z_dev_from_slot",
+        "ay_residual"
+      ],
+      "n_train_pitches": 457859,
+      "n_trees": 33,
+      "cv_rmse": 0.17357817716503085,
+      "cv_r2": 0.0013852356951012056,
+      "holdout_r2": 0.001562764623083357,
+      "holdout_n": 151456
+    },
+    "FB\u00b7oppo": {
+      "file": "stuff_model_fb_oppo_2025.txt",
+      "features": [
+        "release_speed",
+        "pfx_x",
+        "pfx_z",
+        "release_spin_rate",
+        "release_extension",
+        "release_pos_x",
+        "release_pos_z",
+        "arm_angle",
+        "pfx_x_dev_from_slot",
+        "pfx_z_dev_from_slot",
+        "ay_residual"
+      ],
+      "n_train_pitches": 532598,
+      "n_trees": 41,
+      "cv_rmse": 0.18036094284885282,
+      "cv_r2": 0.001481805464917918,
+      "holdout_r2": 0.0014475761134771226,
+      "holdout_n": 179974
+    },
+    "OFF\u00b7same": {
+      "file": "stuff_model_off_same_2025.txt",
+      "features": [
+        "release_speed",
+        "pfx_x",
+        "pfx_z",
+        "release_spin_rate",
+        "spin_axis_sin",
+        "spin_axis_cos",
+        "spin_efficiency",
+        "fb_velo",
+        "delta_velo",
+        "arm_angle",
+        "pfx_x_dev_from_slot",
+        "pfx_z_dev_from_slot",
+        "ay_residual"
+      ],
+      "n_train_pitches": 408953,
+      "n_trees": 30,
+      "cv_rmse": 0.1700150960448524,
+      "cv_r2": 0.0009784694725373244,
+      "holdout_r2": 0.0008438958218620618,
+      "holdout_n": 133826
+    },
+    "OFF\u00b7oppo": {
+      "file": "stuff_model_off_oppo_2025.txt",
+      "features": [
+        "release_speed",
+        "pfx_x",
+        "pfx_z",
+        "release_spin_rate",
+        "spin_axis_sin",
+        "spin_axis_cos",
+        "spin_efficiency",
+        "fb_velo",
+        "delta_velo",
+        "arm_angle",
+        "pfx_x_dev_from_slot",
+        "pfx_z_dev_from_slot",
+        "ay_residual"
+      ],
+      "n_train_pitches": 496005,
+      "n_trees": 35,
+      "cv_rmse": 0.17266876524431232,
+      "cv_r2": 0.000689407356474181,
+      "holdout_r2": 0.0007215469146335529,
+      "holdout_n": 175749
+    }
   },
   "combined_holdout": {
-    "rmse": 0.17701144816908876,
-    "r2": 0.0017560437858350486,
-    "correlation": 0.044114705483647064
+    "rmse": 0.17701650348330109,
+    "r2": 0.0016990247740973352,
+    "correlation": 0.04323790538353634
   },
   "monotone_constraints": null,
   "target": "xRV"

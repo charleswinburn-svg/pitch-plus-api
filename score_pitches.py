@@ -320,13 +320,21 @@ def engineer_location_features(df):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def load_models(model_dir: Path):
+    """Load the stuff/tunnel/location models.
+
+    Stuff is the v3.5 platoon-split architecture: 4 sub-models keyed
+    'FB·same' / 'FB·oppo' / 'OFF·same' / 'OFF·oppo'. Handedness is encoded in
+    the routing (same/oppo), not as a feature. Returned as a single `stuff`
+    bundle: {'models': {key: Booster}, 'features': {key: [...]}, 'family': {...}}.
+    """
     with open(model_dir / 'stuff_model_metadata.json') as f:
         stuff_meta = json.load(f)
-    stuff_fb = lgb.Booster(model_file=str(model_dir / stuff_meta['fb_model']['file']))
-    stuff_offspeed = lgb.Booster(model_file=str(model_dir / stuff_meta['offspeed_model']['file']))
-    stuff_fb_features = stuff_meta['fb_model']['features']
-    stuff_offspeed_features = stuff_meta['offspeed_model']['features']
-    stuff_family = stuff_meta['family_definition']
+    sub = stuff_meta['sub_models']
+    stuff = {
+        'models':   {k: lgb.Booster(model_file=str(model_dir / sub[k]['file'])) for k in sub},
+        'features': {k: sub[k]['features'] for k in sub},
+        'family':   stuff_meta['family_definition'],
+    }
 
     tunnel = lgb.Booster(model_file=str(model_dir / 'tunnel_model_2025.txt'))
 
@@ -335,7 +343,7 @@ def load_models(model_dir: Path):
         pt = f.stem.split('_')[2]  # location_model_FF_2025 → FF
         location_models[pt] = lgb.Booster(model_file=str(f))
 
-    return stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models
+    return stuff, tunnel, location_models
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -366,7 +374,7 @@ LOCATION_FEATURES = [
 ]
 
 
-def score_dataframe(df, stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models, weights):
+def score_dataframe(df, stuff, tunnel, location_models, weights):
     """Run all three model stages on a dataframe, return df with prediction cols."""
     # Remap exotic pitch types to scoring equivalents; restore originals at the end
     _orig_pitch_type = df['pitch_type'].copy()
@@ -377,18 +385,19 @@ def score_dataframe(df, stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offsp
     df = engineer_tunnel_features(df)
     df = engineer_location_features(df)
 
-    # Stuff: route FB vs offspeed by velocity proximity to fastball baseline
-    mph = stuff_family['mph_threshold']
-    fb_types = set(stuff_family['fastball_types'])
+    # Stuff: route each pitch to the FB/OFF × same/oppo sub-model. Pitch family is
+    # velocity proximity to the fastball baseline; platoon is pitcher/batter handedness.
+    fam = stuff['family']
+    fb_types = set(fam['fastball_types'])
     fb_mask = (
-        df['fb_velo'].notna() & (np.abs(df['release_speed'] - df['fb_velo']) <= mph)
+        df['fb_velo'].notna() & (np.abs(df['release_speed'] - df['fb_velo']) <= fam['mph_threshold'])
     ) | (df['fb_velo'].isna() & df['pitch_type'].isin(fb_types))
-    os_mask = ~fb_mask
+    same = (df['p_throws'] == df['stand'])
     df['xRV_stuff'] = np.float32(0.0)
-    if fb_mask.any():
-        df.loc[fb_mask, 'xRV_stuff'] = stuff_fb.predict(df.loc[fb_mask, stuff_fb_features]).astype('float32')
-    if os_mask.any():
-        df.loc[os_mask, 'xRV_stuff'] = stuff_offspeed.predict(df.loc[os_mask, stuff_offspeed_features]).astype('float32')
+    for key, model in stuff['models'].items():
+        m = (fb_mask if key.startswith('FB') else ~fb_mask) & (same if key.endswith('same') else ~same)
+        if m.any():
+            df.loc[m, 'xRV_stuff'] = model.predict(df.loc[m, stuff['features'][key]]).astype('float32')
 
     # Tunnel
     df['xRV_tunnel'] = np.float32(0.0)
@@ -651,8 +660,8 @@ def main():
     config_path = Path(args.config)
 
     print(f'Loading models from {model_dir}...')
-    stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models = load_models(model_dir)
-    print(f'  Stuff FB: {len(stuff_fb_features)} features, Offspeed: {len(stuff_offspeed_features)} features')
+    stuff, tunnel, location_models = load_models(model_dir)
+    print(f'  Stuff sub-models: {", ".join(f"{k}({len(v)}f)" for k, v in stuff["features"].items())}')
     print(f'  Location: {len(location_models)} per-pitch-type models')
     print(f'  Tunnel: loaded')
 
@@ -691,7 +700,7 @@ def main():
 
     print('Running models...')
     df = _to_float64(df)
-    df = score_dataframe(df, stuff_fb, stuff_fb_features, stuff_offspeed, stuff_offspeed_features, stuff_family, tunnel, location_models, weights)
+    df = score_dataframe(df, stuff, tunnel, location_models, weights)
     print(f'  Scored {len(df):,} pitches')
     print(f'  Mean predicted xRV: {df["xRV_final"].mean():.5f}')
     print(f'  Mean actual xRV:    {df["xRV"].mean():.5f}' if 'xRV' in df.columns else '')
