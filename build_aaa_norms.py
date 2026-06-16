@@ -170,10 +170,10 @@ def main():
 
     # Score through MLB models
     print("Scoring through Pitch+ models...")
-    stuff, sf, tunnel, loc = load_models(Path(args.models))
+    stuff, tunnel, loc = load_models(Path(args.models))
     with open(args.config) as f:
         config = json.load(f)
-    df = score_dataframe(df, stuff, sf, tunnel, loc, config)
+    df = score_dataframe(df, stuff, tunnel, loc, config)
 
     # Build game-level aggregates (matches how React displays)
     if 'game_pk' not in df.columns:

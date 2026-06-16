@@ -107,14 +107,11 @@ def main():
     n_total = len(df_full)
     print(f"  {n_total:,} pitches loaded")
 
-    # Unpack the 7-tuple now returned by load_models (split FB/offspeed)
-    (stuff_fb, stuff_fb_features,
-     stuff_offspeed, stuff_offspeed_features,
-     stuff_family, tunnel, location_models) = load_models(Path(args.models))
+    # load_models returns a stuff bundle (4 sub-models: FB/OFF × same/oppo)
+    stuff, tunnel, location_models = load_models(Path(args.models))
 
-    print(f"  FB model:       {len(stuff_fb_features)} features")
-    print(f"  Offspeed model: {len(stuff_offspeed_features)} features")
-    print(f"  Family definition: FB types = {stuff_family.get('fb_types', stuff_family)}")
+    print(f"  Stuff sub-models: {', '.join(f'{k}({len(v)}f)' for k, v in stuff['features'].items())}")
+    print(f"  Family definition: FB types = {stuff['family'].get('fastball_types')}")
 
     with open(args.config) as f:
         weights = json.load(f)
@@ -125,15 +122,7 @@ def main():
         end = min(start + args.chunk_rows, n_total)
         chunk = df_full.iloc[start:end].copy()
         chunk = _to_float64(chunk)
-        chunk = score_dataframe(
-            chunk,
-            stuff_fb, stuff_fb_features,
-            stuff_offspeed, stuff_offspeed_features,
-            stuff_family,
-            tunnel,
-            location_models,
-            weights,
-        )
+        chunk = score_dataframe(chunk, stuff, tunnel, location_models, weights)
         stats.update(chunk[['pitch_type'] + [col for _, col in COMPONENTS]])
         del chunk
         gc.collect()

@@ -37,10 +37,11 @@ MODELS_DIR = ROOT / "models"
 print("Loading models...")
 with open(MODELS_DIR / "stuff_model_metadata.json") as f:
     _stuff_meta = json.load(f)
-stuff_fb_model = lgb.Booster(model_file=str(MODELS_DIR / _stuff_meta["fb_model"]["file"]))
-stuff_offspeed_model = lgb.Booster(model_file=str(MODELS_DIR / _stuff_meta["offspeed_model"]["file"]))
-stuff_fb_features = _stuff_meta["fb_model"]["features"]
-stuff_offspeed_features = _stuff_meta["offspeed_model"]["features"]
+# v3.5 platoon-split stuff model: 4 sub-models keyed FB·same / FB·oppo / OFF·same / OFF·oppo.
+# Handedness is encoded in the routing (same/oppo), not as a feature.
+_stuff_sub = _stuff_meta["sub_models"]
+stuff_models = {k: lgb.Booster(model_file=str(MODELS_DIR / _stuff_sub[k]["file"])) for k in _stuff_sub}
+stuff_features = {k: _stuff_sub[k]["features"] for k in _stuff_sub}
 _STUFF_FB_TYPES = set(_stuff_meta["family_definition"]["fastball_types"])
 _STUFF_MPH_THRESHOLD = _stuff_meta["family_definition"]["mph_threshold"]
 
@@ -433,16 +434,17 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
                            + c['slope_spin'] * df.loc[mask, 'release_spin_rate'])
             df.loc[mask, 'ay_residual'] = (df.loc[mask, 'ay'] - expected_ay).astype(float)
 
-    # ── Stuff prediction: route FB vs offspeed by velocity proximity to fastball baseline ──
+    # ── Stuff prediction: route each pitch to FB/OFF × same/oppo sub-model ──
+    # Family = velocity proximity to fastball baseline; platoon = pitcher/batter handedness.
     fb_mask = (
         df['fb_velo'].notna() & (np.abs(df['release_speed'] - df['fb_velo']) <= _STUFF_MPH_THRESHOLD)
     ) | (df['fb_velo'].isna() & df['pitch_type'].isin(_STUFF_FB_TYPES))
-    os_mask = ~fb_mask
+    same = (df['p_throws'] == df['stand'])
     df['xRV_stuff'] = 0.0
-    if fb_mask.any():
-        df.loc[fb_mask, 'xRV_stuff'] = stuff_fb_model.predict(df.loc[fb_mask, stuff_fb_features])
-    if os_mask.any():
-        df.loc[os_mask, 'xRV_stuff'] = stuff_offspeed_model.predict(df.loc[os_mask, stuff_offspeed_features])
+    for key, model in stuff_models.items():
+        m = (fb_mask if key.startswith('FB') else ~fb_mask) & (same if key.endswith('same') else ~same)
+        if m.any():
+            df.loc[m, 'xRV_stuff'] = model.predict(df.loc[m, stuff_features[key]])
 
     # ── Location features ──
     df['plate_x_adj'] = np.where(df['stand']=='L', -df['plate_x'], df['plate_x'])
