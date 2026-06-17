@@ -543,6 +543,34 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
             'pitch_plus':  _per_type_plus(row['xRV'],   pt, 'pitch'),
         }
 
+    # ── Platoon (L/R batter) breakdown per pitcher × pitch-type ─────────────
+    # Requires ≥30 pitches on each side to publish a split. Uses Statcast pfx
+    # (same source as the leaderboard), so these are consistent with the overall
+    # grades and avoid the kinematic pfx gap of the live API path.
+    _MIN_N_PLATOON = 30
+    if 'stand' in df.columns:
+        _pt_stand = df.groupby(['pitcher', 'pitch_type', 'stand'], dropna=True).agg(
+            n=('xRV_final', 'count'),
+            stuff=('xRV_stuff', 'mean'),
+            pitch=('xRV_final', 'mean'),
+        ).reset_index()
+        for _col in ['stuff', 'pitch']:
+            _pt_stand[_col] = (_pt_stand[_col] * 100).round(3)
+        for _, _row in _pt_stand.iterrows():
+            _pid = str(int(_row['pitcher']))
+            _pt  = _row['pitch_type']
+            _side = _row['stand']
+            if _side not in ('L', 'R') or _pid not in pt_out or _pt not in pt_out[_pid]:
+                continue
+            _n = int(_row['n'])
+            if _n < _MIN_N_PLATOON:
+                continue
+            _sp = _per_type_plus(_row['stuff'], _pt, 'stuff')
+            _pp = _per_type_plus(_row['pitch'], _pt, 'pitch')
+            if _sp is None and _pp is None:
+                continue
+            pt_out[_pid][_pt][_side] = {'n': _n, 'stuff_plus': _sp, 'pitch_plus': _pp}
+
     # ── Pitcher overall — weight-average the per-type Plus values by usage ──
     def _weighted_overall(pid_pt_grades, metric_key):
         total = 0
@@ -603,12 +631,16 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
         print(f'  Stuff+ raw dist: mean={_sp_mean:.3f}, stdev={_sp_stdev:.3f}  → rescaling to mean=100, stdev=10')
 
         if _sp_stdev > 0:
-            # Rescale all per-type Stuff+ values in-place
+            # Rescale all per-type Stuff+ values in-place (including platoon splits)
             for _by_pt in pt_out.values():
                 for _g in _by_pt.values():
                     if _g.get('stuff_plus') is not None:
                         _g['stuff_plus'] = round(
                             100.0 + (_g['stuff_plus'] - _sp_mean) / _sp_stdev * 10.0, 1)
+                    for _side in ('L', 'R'):
+                        if isinstance(_g.get(_side), dict) and _g[_side].get('stuff_plus') is not None:
+                            _g[_side]['stuff_plus'] = round(
+                                100.0 + (_g[_side]['stuff_plus'] - _sp_mean) / _sp_stdev * 10.0, 1)
 
             # Recompute pitcher-level Stuff+ from the rescaled per-type values
             for _pid in pitcher_out:

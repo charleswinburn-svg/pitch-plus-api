@@ -888,13 +888,18 @@ def _build_leaderboard(season: int) -> dict:
         for pt, pg in pt_raw.get(pid, {}).items():
             if pg.get("n", 0) < MIN_N_PER_PITCH_TYPE:
                 continue
-            by_pt[pt] = {
+            entry = {
                 "stuff": pg.get("stuff_plus"),
                 "loc":   pg.get("loc_plus"),
                 "tun":   pg.get("tun_plus"),
                 "pitch": pg.get("pitch_plus"),
                 "n":     int(pg["n"]),
             }
+            if pg.get("L"):
+                entry["L"] = pg["L"]
+            if pg.get("R"):
+                entry["R"] = pg["R"]
+            by_pt[pt] = entry
         result.append({
             "player_id":     int(pid),
             "overall":       overall,
