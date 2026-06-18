@@ -668,26 +668,28 @@ def score_aggregate(req: PitchRequest):
     Same payload as /score. Response by_pitch_type shape matches /leaderboard
     so single-game and season numbers are directly comparable.
     """
+    orig_idx_map = []
     rows = []
     pitcher_ids = []
-    for evt in req.pitches:
+    for orig_idx, evt in enumerate(req.pitches):
         pid = evt.get("pitcher_id") or evt.get("_pitcher_id")
         mapped = map_pitch(evt, pid)
         if mapped:
             rows.append(mapped)
             pitcher_ids.append(pid)
+            orig_idx_map.append(orig_idx)
 
     if req.start_date or req.end_date:
-        paired = [(r, pid) for r, pid in zip(rows, pitcher_ids)
+        paired = [(r, pid, oi) for r, pid, oi in zip(rows, pitcher_ids, orig_idx_map)
                   if _date_in_range(r.get("game_date"), req.start_date, req.end_date)]
         if paired:
-            rows, pitcher_ids = zip(*paired)
-            rows, pitcher_ids = list(rows), list(pitcher_ids)
+            rows, pitcher_ids, orig_idx_map = zip(*paired)
+            rows, pitcher_ids, orig_idx_map = list(rows), list(pitcher_ids), list(orig_idx_map)
         else:
-            rows, pitcher_ids = [], []
+            rows, pitcher_ids, orig_idx_map = [], [], []
 
     if not rows:
-        return {"by_pitch_type": {}, "overall": {"stuff": None, "loc": None, "tun": None, "pitch": None, "n": 0}}
+        return {"by_pitch_type": {}, "overall": {"stuff": None, "loc": None, "tun": None, "pitch": None, "n": 0}, "per_pitch": []}
 
     norm = (pitch_plus_norm_aaa if req.is_aaa and pitch_plus_norm_aaa else pitch_plus_norm)
     scored = engineer_and_score(rows, norm)
@@ -699,6 +701,7 @@ def score_aggregate(req: PitchRequest):
     per_pid = defaultdict(lambda: defaultdict(_new_bucket))
     distinct_pids = set()
 
+    per_pitch_arr = [None] * len(req.pitches)
     for i, s in enumerate(scored):
         pid = pitcher_ids[i]
         pt = s.get("pitch_type_display", s.get("pitch_type"))  # original pre-alias type
@@ -709,6 +712,13 @@ def score_aggregate(req: PitchRequest):
             b["pitch"] += s.get("xRV_final",    0.0)
             b["n"]     += 1
         distinct_pids.add(pid)
+        if i < len(orig_idx_map):
+            pt_norm = PITCH_ALIASES.get(pt, pt)
+            per_pitch_arr[orig_idx_map[i]] = {
+                "stuff": _per_type_plus_agg(s.get("xRV_stuff",    0.0), pt_norm, "stuff"),
+                "loc":   _per_type_plus_agg(s.get("xRV_location", 0.0), pt_norm, "loc"),
+                "pitch": _per_type_plus_agg(s.get("xRV_final",   0.0), pt_norm, "pitch"),
+            }
 
     def _bucket_to_plus(pt_display, b):
         n = b["n"]
@@ -724,7 +734,7 @@ def score_aggregate(req: PitchRequest):
         }
 
     by_pt = {pt: g for pt, b in cross.items() if (g := _bucket_to_plus(pt, b)) is not None}
-    resp = {"by_pitch_type": by_pt, "overall": _weighted_overall_agg(by_pt)}
+    resp = {"by_pitch_type": by_pt, "overall": _weighted_overall_agg(by_pt), "per_pitch": per_pitch_arr}
 
     if len(distinct_pids) > 1:
         resp["by_pitcher"] = {}
