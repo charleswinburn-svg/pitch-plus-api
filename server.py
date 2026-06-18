@@ -629,8 +629,14 @@ def _per_type_plus_agg(xrv_mean: float, pitch_type: str, kind: str):
         return None
     z = max(-4.0, min(4.0, (xrv_mean - n[mean_key]) / n[std_key]))
     raw = 100.0 - z * 10.0
-    if kind == 'stuff':
-        r = pitch_plus_norm.get('_stuff_plus_rescale', {})
+    rescale_key = {
+        'stuff': '_stuff_plus_rescale',
+        'loc':   '_loc_plus_rescale',
+        'tun':   '_tun_plus_rescale',
+        'pitch': '_pitch_plus_rescale',
+    }.get(kind)
+    if rescale_key:
+        r = pitch_plus_norm.get(rescale_key, {})
         if isinstance(r, dict) and r.get('stdev', 0) > 0:
             raw = 100.0 + (raw - r['mean']) / r['stdev'] * 10.0
     return round(raw, 1)

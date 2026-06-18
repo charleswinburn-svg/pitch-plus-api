@@ -614,47 +614,52 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
     # then apply a linear rescaling so the global distribution has mean=100
     # and stdev=10.  Store the raw params in the norm file so the API can
     # apply the same rescaling at query time.
-    _sp_vals, _sp_wts = [], []
-    for _by_pt in pt_out.values():
-        for _g in _by_pt.values():
-            _sp = _g.get('stuff_plus')
-            _n  = _g.get('n', 0)
-            if _sp is not None and _n > 0:
-                _sp_vals.append(_sp)
-                _sp_wts.append(_n)
+    # ── Rescale all Plus metrics to mean=100, stdev=10 ──────────────────────
+    # Stuff+/Loc+/Tun+/Pitch+ each get a linear rescaling so the league-wide
+    # pitcher×pitch-type distribution has exactly mean=100, stdev=10.
+    # Params stored in norm file so /score_aggregate can apply the same transform.
+    _norm_updates = {}
 
-    if _sp_vals:
-        _sp_arr = np.array(_sp_vals)
-        _sp_w   = np.array(_sp_wts, dtype=float); _sp_w /= _sp_w.sum()
-        _sp_mean  = float(np.average(_sp_arr, weights=_sp_w))
-        _sp_stdev = float(np.sqrt(np.average((_sp_arr - _sp_mean) ** 2, weights=_sp_w)))
-        print(f'  Stuff+ raw dist: mean={_sp_mean:.3f}, stdev={_sp_stdev:.3f}  → rescaling to mean=100, stdev=10')
+    def _rescale_plus(key, label):
+        _vals, _wts = [], []
+        for _by_pt in pt_out.values():
+            for _g in _by_pt.values():
+                _v = _g.get(key); _n = _g.get('n', 0)
+                if _v is not None and _n > 0:
+                    _vals.append(_v); _wts.append(_n)
+        if not _vals:
+            return
+        _arr = np.array(_vals)
+        _w   = np.array(_wts, dtype=float); _w /= _w.sum()
+        _mean = float(np.average(_arr, weights=_w))
+        _std  = float(np.sqrt(np.average((_arr - _mean) ** 2, weights=_w)))
+        print(f'  {label} raw dist: mean={_mean:.3f}, stdev={_std:.3f}  → rescaling to mean=100, stdev=10')
+        if _std <= 0:
+            return
+        for _by_pt in pt_out.values():
+            for _g in _by_pt.values():
+                if _g.get(key) is not None:
+                    _g[key] = round(100.0 + (_g[key] - _mean) / _std * 10.0, 1)
+                # Also rescale platoon split sub-objects (L/R carry stuff_plus and pitch_plus)
+                for _side in ('L', 'R'):
+                    if isinstance(_g.get(_side), dict) and _g[_side].get(key) is not None:
+                        _g[_side][key] = round(100.0 + (_g[_side][key] - _mean) / _std * 10.0, 1)
+        for _pid in pitcher_out:
+            pitcher_out[_pid][key] = _weighted_overall(pt_out.get(_pid, {}), key)
+        _norm_updates[f'_{key}_rescale'] = {'mean': _mean, 'stdev': _std}
 
-        if _sp_stdev > 0:
-            # Rescale all per-type Stuff+ values in-place (including platoon splits)
-            for _by_pt in pt_out.values():
-                for _g in _by_pt.values():
-                    if _g.get('stuff_plus') is not None:
-                        _g['stuff_plus'] = round(
-                            100.0 + (_g['stuff_plus'] - _sp_mean) / _sp_stdev * 10.0, 1)
-                    for _side in ('L', 'R'):
-                        if isinstance(_g.get(_side), dict) and _g[_side].get('stuff_plus') is not None:
-                            _g[_side]['stuff_plus'] = round(
-                                100.0 + (_g[_side]['stuff_plus'] - _sp_mean) / _sp_stdev * 10.0, 1)
+    _rescale_plus('stuff_plus', 'Stuff+')
+    _rescale_plus('loc_plus',   'Loc+')
+    _rescale_plus('tun_plus',   'Tun+')
+    _rescale_plus('pitch_plus', 'Pitch+')
 
-            # Recompute pitcher-level Stuff+ from the rescaled per-type values
-            for _pid in pitcher_out:
-                pitcher_out[_pid]['stuff_plus'] = _weighted_overall(
-                    pt_out.get(_pid, {}), 'stuff_plus')
-
-            # Persist raw params to norm file so the API applies the same rescaling
-            if norm_path and Path(norm_path).exists():
-                with open(norm_path) as _f:
-                    _norm_data = json.load(_f)
-                _norm_data['_stuff_plus_rescale'] = {'mean': _sp_mean, 'stdev': _sp_stdev}
-                with open(norm_path, 'w') as _f:
-                    json.dump(_norm_data, _f, indent=2)
-                print(f'  Updated {norm_path} with _stuff_plus_rescale')
+    if _norm_updates and norm_path and Path(norm_path).exists():
+        with open(norm_path) as _f:
+            _norm_data = json.load(_f)
+        _norm_data.update(_norm_updates)
+        with open(norm_path, 'w') as _f:
+            json.dump(_norm_data, _f, indent=2)
+        print(f'  Updated {norm_path}: {list(_norm_updates)}')
 
     pitcher_path = season_dir / f'pitcher_grades_{season}.json'
     pt_path      = season_dir / f'pitcher_pitch_type_grades_{season}.json'
