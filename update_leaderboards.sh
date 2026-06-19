@@ -131,5 +131,31 @@ echo "=== Step 3: Building team plots for ${YEAR} ==="
 
 echo "  Team plots  : $FRONTEND_DIR/public/team_plus_${YEAR}.json"
 
+# ── Step 4: Build hitter xRV/600 PA card data ────────────────────────────────
+# The hitter xRV model (models/xrv_model_2022_2025.pkl) is cloudpickled Python
+# 3.12 bytecode + scikit-learn 1.6.1 and SEGFAULTS under the lightgbm venv's
+# Python. It needs its OWN interpreter. Resolve one (env XRV_PY wins), else a
+# .venv-xrv alongside the repos. If none is found, warn and skip — this step is
+# optional and must never fail the pitcher pipeline.
+echo ""
+echo "=== Step 4: Building hitter xRV for ${YEAR} ==="
+XRV_PY="${XRV_PY:-}"
+if [[ -z "$XRV_PY" ]]; then
+    for cand in "$FRONTEND_DIR/.venv-xrv/bin/python" "$API_DIR/.venv-xrv/bin/python"; do
+        if [[ -x "$cand" ]]; then XRV_PY="$cand"; break; fi
+    done
+fi
+if [[ -z "$XRV_PY" || ! -x "$XRV_PY" ]]; then
+    echo "  ⚠ No xRV interpreter found (set XRV_PY or create $FRONTEND_DIR/.venv-xrv)."
+    echo "    Skipping hitter xRV. To enable:"
+    echo "      uv venv --python 3.12 $FRONTEND_DIR/.venv-xrv"
+    echo "      $FRONTEND_DIR/.venv-xrv/bin/python -m pip install scikit-learn==1.6.1 cloudpickle 'numpy>=2,<3' 'pandas>=2,<3' pyarrow pybaseball"
+elif ! "$XRV_PY" -c "import sklearn, cloudpickle" 2>/dev/null; then
+    echo "  ⚠ $XRV_PY is missing scikit-learn/cloudpickle — skipping hitter xRV."
+else
+    (cd "$FRONTEND_DIR" && "$XRV_PY" build_hitter_xrv.py --season "$YEAR" --parquet "$PARQUET")
+    echo "  Hitter xRV  : $FRONTEND_DIR/public/hitter_xrv_${YEAR}.json"
+fi
+
 echo ""
 echo "=== Done. ==="
