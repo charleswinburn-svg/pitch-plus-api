@@ -155,6 +155,7 @@ elif ! "$XRV_PY" -c "import sklearn, cloudpickle" 2>/dev/null; then
 else
     (cd "$FRONTEND_DIR" && "$XRV_PY" build_hitter_xrv.py --season "$YEAR" --parquet "$PARQUET")
     echo "  Hitter xRV  : $FRONTEND_DIR/public/hitter_xrv_${YEAR}.json"
+    echo "  xRV (games) : $FRONTEND_DIR/public/hitter_xrv_games_${YEAR}.json"
 fi
 
 echo ""
