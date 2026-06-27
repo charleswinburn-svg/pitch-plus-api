@@ -32,6 +32,15 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
+# Fallback baselines for pitchers missing from pitcher_baselines.json (debuts).
+# Defensive import: a stray copy of this file outside the API dir degrades to
+# the old stored-only behavior rather than crashing.
+try:
+    from baseline_fallback import league_fb_baseline, effective_baselines
+    _HAS_FALLBACK = True
+except Exception:
+    _HAS_FALLBACK = False
+
 
 NUMERIC_COLS = ['release_speed','pfx_x','pfx_z','release_spin_rate','spin_axis',
     'release_extension','release_pos_x','release_pos_z','vx0','vy0','vz0',
@@ -91,13 +100,15 @@ def engineer_stuff_features(df):
     baselines_path = Path(__file__).parent / 'models' / 'pitcher_baselines.json'
     with open(baselines_path) as _f:
         _baselines = json.load(_f)
+    _eff = (effective_baselines(df, _baselines, league_fb_baseline(_baselines))
+            if _HAS_FALLBACK else _baselines)
 
     for col in ['fb_velo','fb_pfx_x','fb_pfx_z','fb_spin','fb_extension','fb_vaa',
                 'fb_rel_x','fb_rel_z']:
         df[col] = np.nan
     for pid, group in df.groupby('pitcher'):
         pid_s = str(int(pid)) if pd.notna(pid) else None
-        bl = _baselines.get(pid_s) if pid_s else None
+        bl = _eff.get(pid_s) if pid_s else None
         if not bl: continue
         mask = df['pitcher'] == pid
         df.loc[mask, 'fb_velo'] = bl['fb_velo']
@@ -272,11 +283,13 @@ def engineer_tunnel_features(df):
     _baselines_path = Path(__file__).parent / 'models' / 'pitcher_baselines.json'
     with open(_baselines_path) as _f:
         _baselines = json.load(_f)
+    _eff = (effective_baselines(df, _baselines, league_fb_baseline(_baselines))
+            if _HAS_FALLBACK else _baselines)
     for col in ['fb_tunnel_x','fb_tunnel_z','fb_plate_x','fb_plate_z']:
         df[col] = np.nan
     for pid, _ in df.groupby('pitcher'):
         pid_s = str(int(pid)) if pd.notna(pid) else None
-        bl = _baselines.get(pid_s) if pid_s else None
+        bl = _eff.get(pid_s) if pid_s else None
         if not bl: continue
         mask = df['pitcher'] == pid
         df.loc[mask, 'fb_tunnel_x'] = bl.get('fb_tunnel_x', np.nan)
