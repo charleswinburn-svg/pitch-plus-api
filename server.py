@@ -64,6 +64,12 @@ intercept = config["intercept"]
 with open(MODELS_DIR / "pitcher_baselines.json") as f:
     pitcher_baselines = json.load(f)
 
+# Fallback baselines for pitchers missing from pitcher_baselines.json (in-season
+# debuts): synthesize from the sample's own fastballs, else league average, so
+# their Stuff+/Tun+ deltas aren't zeroed. Pitchers WITH a baseline are untouched.
+from baseline_fallback import league_fb_baseline, effective_baselines as _effective_baselines
+_league_fb = league_fb_baseline(pitcher_baselines)
+
 # Authoritative pitcher handedness: baselines take priority, then arm_angles.
 # Populated from p_throws field added by build_pitcher_baselines.py /
 # build_arm_angle_baselines.py. Overrides whatever the frontend sends.
@@ -336,7 +342,9 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
     df['haa'] = np.degrees(np.arctan2(df['vx0'].values + df['ax'].values * t,
                                        -(df['vy0'].values + df['ay'].values * t)))
 
-    # Deltas vs pitcher's fastball baseline (now includes fb_velo as direct feature)
+    # Deltas vs pitcher's fastball baseline (now includes fb_velo as direct feature).
+    # eff_bl = stored baseline, else synthesized from this sample's fastballs / league avg.
+    eff_bl = _effective_baselines(df, pitcher_baselines, _league_fb)
     df['fb_velo'] = np.nan
     for col in ['delta_velo','delta_pfx_x','delta_pfx_z','delta_spin','delta_extension','delta_vaa',
                 'release_diff_x','release_diff_z','release_distance','movement_separation']:
@@ -344,7 +352,7 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
 
     for i, row in df.iterrows():
         pid = str(int(row['pitcher'])) if pd.notna(row.get('pitcher')) else None
-        bl = pitcher_baselines.get(pid) if pid else None
+        bl = eff_bl.get(pid) if pid else None
         if bl:
             df.at[i,'fb_velo'] = bl['fb_velo']
             df.at[i,'delta_velo'] = row['release_speed'] - bl['fb_velo']
@@ -501,7 +509,7 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
     df['plate_distance'] = 0.0
     for i, row in df.iterrows():
         pid = str(int(row['pitcher'])) if pd.notna(row.get('pitcher')) else None
-        bl = pitcher_baselines.get(pid) if pid else None
+        bl = eff_bl.get(pid) if pid else None
         if bl and 'fb_tunnel_x' in bl:
             df.at[i,'tunnel_diff_x'] = (row['tunnel_x'] - bl['fb_tunnel_x']) if pd.notna(row['tunnel_x']) else 0.0
             df.at[i,'tunnel_diff_z'] = (row['tunnel_z'] - bl['fb_tunnel_z']) if pd.notna(row['tunnel_z']) else 0.0
