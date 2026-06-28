@@ -110,7 +110,9 @@ def fetch_savant(date, game_pk):
 # Payload builders (feed the production map_pitch / engineer_and_score)
 # ─────────────────────────────────────────────────────────────────────────────
 def live_evt(g):
-    """Live payload: no _pfx_direct → server derives pfx from kinematics."""
+    """Live payload — mirrors the production frontend makePitch (no _pfx_direct).
+    Includes breakHorizontal/breakVerticalInduced so the server's break-preferred
+    pfx path is exercised; re-running post-fix should drive Δ to ~0."""
     return {
         "pitcher_id": g["pitcher_id"], "_stand": g["stand"], "_p_throws": g["p_throws"],
         "details": {"type": {"code": g["pitch_type"]}},
@@ -119,7 +121,9 @@ def live_evt(g):
             "strikeZoneTop": g["szTop"], "strikeZoneBottom": g["szBot"],
             "coordinates": {k: g[k] for k in ("pfxX", "pfxZ", "pX", "pZ", "x0", "z0",
                                               "vX0", "vY0", "vZ0", "aX", "aY", "aZ")},
-            "breaks": {"spinRate": g["spin"], "spinDirection": g["spinDirection"]},
+            "breaks": {"spinRate": g["spin"], "spinDirection": g["spinDirection"],
+                       "breakHorizontal": g["breakHorizontal"],
+                       "breakVerticalInduced": g["breakVerticalInduced"]},
         },
     }
 
@@ -198,6 +202,9 @@ def compare_game(game_pk):
         pt = lo.get("pitch_type")
         sp_live = _per_type_plus_agg(lo["xRV_stuff"], server.PITCH_ALIASES.get(pt, pt), "stuff")
         sp_sav = _per_type_plus_agg(so["xRV_stuff"], server.PITCH_ALIASES.get(pt, pt), "stuff")
+        # kinematic candidate computed directly (independent of what production
+        # now uses) so the source ranking stays a true before/after comparison.
+        kpx, kpz = _pfx_from_kinematics(g["aX"], g["aY"], g["aZ"], g["vY0"])
         recs.append({
             "game_pk": game_pk, "pitch_type": pt, "is_fb": pt in FB_TYPES,
             # raw model inputs (live = kinematic/MLB, sav = Savant)
@@ -214,10 +221,10 @@ def compare_game(game_pk):
             "vY0_g": g["vY0"], "vY0_s": _f(s.get("vy0")), "ext_g": g["extension"], "ext_s": _f(s.get("release_extension")),
             # candidate live pfx sources vs Savant (inches): which best reproduces Savant pfx_z?
             "savant_ivb_in": (sr.get("pfx_z") or np.nan) * 12,
-            "kinematic_ivb_in": (lr.get("pfx_z") or np.nan) * 12,
+            "kinematic_ivb_in": (kpz if kpz is not None else np.nan) * 12,
             "mlb_pfxZ_in": g["pfxZ"], "mlb_breakIVB_in": g["breakVerticalInduced"],
             "savant_hb_in": (sr.get("pfx_x") or np.nan) * 12,
-            "kinematic_hb_in": (lr.get("pfx_x") or np.nan) * 12,
+            "kinematic_hb_in": (kpx if kpx is not None else np.nan) * 12,
             "mlb_pfxX_in": g["pfxX"], "mlb_breakHB_in": g["breakHorizontal"],
             # outputs
             "xrv_stuff_live": lo["xRV_stuff"], "xrv_stuff_sav": so["xRV_stuff"],

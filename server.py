@@ -252,9 +252,21 @@ def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
         pfx_x = coords.get("pfxX")
         pfx_z = coords.get("pfxZ")
     else:
-        pfx_x, pfx_z = _pfx_from_kinematics(
-            coords.get("aX"), coords.get("aY"), coords.get("aZ"), coords.get("vY0"),
-        )
+        # Prefer MLB's published break over the kinematic reproduction. Diagnostic
+        # (diagnose_live_vs_savant.py) showed _pfx_from_kinematics under-states
+        # break vs Savant — FF IVB ~0.8" low, sweepers ~2.7" low — which dropped
+        # live Stuff+ ~4 pts below the next-day Savant grade. breakVerticalInduced
+        # matches Savant pfx_z to 0.02" MAE and -breakHorizontal matches pfx_x to
+        # 0.02"; fall back to kinematics only when the break fields are absent.
+        bvi = breaks.get("breakVerticalInduced")
+        bh = breaks.get("breakHorizontal")
+        if bvi is not None and bh is not None:
+            pfx_z = bvi / 12.0
+            pfx_x = -bh / 12.0
+        else:
+            pfx_x, pfx_z = _pfx_from_kinematics(
+                coords.get("aX"), coords.get("aY"), coords.get("aZ"), coords.get("vY0"),
+            )
     return {
         "pitch_type": type_code,
         "release_speed": pd_.get("startSpeed"),
