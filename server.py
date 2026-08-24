@@ -737,6 +737,7 @@ def score_aggregate(req: PitchRequest):
             per_pitch_arr[orig_idx_map[i]] = {
                 "stuff": _per_type_plus_agg(s.get("xRV_stuff",    0.0), pt_norm, "stuff"),
                 "loc":   _per_type_plus_agg(s.get("xRV_location", 0.0), pt_norm, "loc"),
+                "tun":   _per_type_plus_agg(s.get("xRV_tunnel",   0.0), pt_norm, "tun"),
                 "pitch": _per_type_plus_agg(s.get("xRV_final",   0.0), pt_norm, "pitch"),
             }
 
