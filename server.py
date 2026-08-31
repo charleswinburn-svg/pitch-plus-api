@@ -663,14 +663,15 @@ def _per_type_plus_agg(xrv_mean: float, pitch_type: str, kind: str):
 
 
 def _weighted_overall_agg(by_pt: dict) -> dict:
-    """Usage-weighted average of per-pitch-type Plus values."""
-    totals = {k: 0.0 for k in ('stuff', 'loc', 'tun', 'pitch')}
-    counts = {k: 0   for k in ('stuff', 'loc', 'tun', 'pitch')}
+    """Usage-weighted average of per-pitch-type Plus values (+ expected RV/100)."""
+    keys = ('stuff', 'loc', 'tun', 'pitch', 'xrv')
+    totals = {k: 0.0 for k in keys}
+    counts = {k: 0   for k in keys}
     n_total = 0
     for g in by_pt.values():
         n = g.get('n', 0)
         n_total += n
-        for k in ('stuff', 'loc', 'tun', 'pitch'):
+        for k in keys:
             v = g.get(k)
             if v is not None and n > 0:
                 totals[k] += v * n
@@ -678,6 +679,7 @@ def _weighted_overall_agg(by_pt: dict) -> dict:
     out = {'n': n_total}
     for k in ('stuff', 'loc', 'tun', 'pitch'):
         out[k] = round(totals[k] / counts[k], 1) if counts[k] else None
+    out['xrv'] = round(totals['xrv'] / counts['xrv'], 3) if counts['xrv'] else None
     return out
 
 
@@ -920,6 +922,8 @@ def _build_leaderboard(season: int) -> dict:
             "loc":   g.get("loc_plus"),
             "tun":   g.get("tun_plus"),
             "pitch": g.get("pitch_plus"),
+            "xrv":   g.get("xRV"),   # expected run value, RV/100
+            "rv":    g.get("rv"),    # actual run value, Savant runs-saved/100
             "n":     int(g["n"]),
         }
         by_pt = {}
