@@ -529,16 +529,29 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
         z = max(-4, min(4, (xrv_per100 / 100 - n[mean_key]) / n[std_key]))
         return round(100 - z * 10, 1)
 
+    # Actual (outcome-based) run value from Statcast delta_run_exp, if present —
+    # this is Baseball Savant's "Run Value". Aggregated alongside the model xRV.
+    _has_dre = 'delta_run_exp' in df.columns
+    if not _has_dre:
+        print("  ⚠ delta_run_exp not in parquet — actual Run Value (rv) will be null")
+
     # ── Pitcher × pitch_type aggregation (compute per-type Plus values first) ──
-    pt_agg = df.groupby(['pitcher', 'pitch_type']).agg(
+    _pt_agg_spec = dict(
         n=('xRV_final', 'count'),
         xRV=('xRV_final', 'mean'),
         stuff=('xRV_stuff', 'mean'),
         loc=('xRV_location', 'mean'),
         tun=('xRV_tunnel', 'mean'),
-    ).reset_index()
+    )
+    if _has_dre:
+        _pt_agg_spec['rv'] = ('delta_run_exp', 'mean')
+    pt_agg = df.groupby(['pitcher', 'pitch_type']).agg(**_pt_agg_spec).reset_index()
     for col in ['xRV', 'stuff', 'loc', 'tun']:
         pt_agg[col] = (pt_agg[col] * 100).round(3)
+    if _has_dre:
+        # Pitcher's perspective, per 100 pitches: negate delta_run_exp (a positive
+        # value helps the offense) so higher rv = more runs saved = better.
+        pt_agg['rv'] = (-pt_agg['rv'] * 100).round(3)
 
     pt_out = {}
     for _, row in pt_agg.iterrows():
@@ -547,6 +560,7 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
         pt_out.setdefault(pid, {})[pt] = {
             'n':           int(row['n']),
             'xRV':         float(row['xRV']),
+            'rv':          (float(row['rv']) if _has_dre and pd.notna(row['rv']) else None),
             'stuff':       float(row['stuff']),
             'loc':         float(row['loc']),
             'tun':         float(row['tun']),
@@ -596,15 +610,20 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
                 total += n
         return round(weighted_sum / total, 1) if total else None
 
-    pitcher_agg = df.groupby('pitcher').agg(
+    _pitcher_agg_spec = dict(
         n=('xRV_final', 'count'),
         xRV=('xRV_final', 'mean'),
         stuff=('xRV_stuff', 'mean'),
         loc=('xRV_location', 'mean'),
         tun=('xRV_tunnel', 'mean'),
     )
+    if _has_dre:
+        _pitcher_agg_spec['rv'] = ('delta_run_exp', 'mean')
+    pitcher_agg = df.groupby('pitcher').agg(**_pitcher_agg_spec)
     for col in ['xRV', 'stuff', 'loc', 'tun']:
         pitcher_agg[col] = (pitcher_agg[col] * 100).round(3)
+    if _has_dre:
+        pitcher_agg['rv'] = (-pitcher_agg['rv'] * 100).round(3)
 
     pitcher_out = {}
     for pid, row in pitcher_agg.iterrows():
@@ -613,6 +632,7 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
         pitcher_out[pid_str] = {
             'n':           int(row['n']),
             'xRV':         float(row['xRV']),
+            'rv':          (float(row['rv']) if _has_dre and pd.notna(row['rv']) else None),
             'stuff':       float(row['stuff']),
             'loc':         float(row['loc']),
             'tun':         float(row['tun']),

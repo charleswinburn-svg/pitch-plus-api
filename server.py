@@ -751,6 +751,7 @@ def score_aggregate(req: PitchRequest):
             "loc":   _per_type_plus_agg(b["loc"]   / n, pt_norm, "loc"),
             "tun":   _per_type_plus_agg(b["tun"]   / n, pt_norm, "tun"),
             "pitch": _per_type_plus_agg(b["pitch"] / n, pt_norm, "pitch"),
+            "xrv":   (b["pitch"] / n) * 100,   # expected run value, RV/100 (matches season xRV scaling)
             "n": n,
         }
 
@@ -930,6 +931,8 @@ def _build_leaderboard(season: int) -> dict:
                 "loc":   pg.get("loc_plus"),
                 "tun":   pg.get("tun_plus"),
                 "pitch": pg.get("pitch_plus"),
+                "xrv":   pg.get("xRV"),   # expected run value, RV/100 (higher = more runs allowed)
+                "rv":    pg.get("rv"),    # actual run value, Savant runs-saved/100 (higher = better); None until re-scored
                 "n":     int(pg["n"]),
             }
             if pg.get("L"):
