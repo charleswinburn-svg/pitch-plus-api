@@ -720,6 +720,11 @@ def score_aggregate(req: PitchRequest):
         return {"stuff": 0.0, "loc": 0.0, "tun": 0.0, "pitch": 0.0, "n": 0}
 
     cross = defaultdict(_new_bucket)
+    # Same scored pitches split by batter side, so platoon grades always agree with
+    # the overall ones. (Scoring L-only / R-only subsets separately re-derives the
+    # fastball baseline from each subset for pitchers without a stored baseline,
+    # which can put the overall grade outside both splits.)
+    cross_stand = defaultdict(_new_bucket)
     per_pid = defaultdict(lambda: defaultdict(_new_bucket))
     distinct_pids = set()
 
@@ -727,7 +732,11 @@ def score_aggregate(req: PitchRequest):
     for i, s in enumerate(scored):
         pid = pitcher_ids[i]
         pt = s.get("pitch_type_display", s.get("pitch_type"))  # original pre-alias type
-        for b in (cross[pt], per_pid[pid][pt]):
+        stand = rows[i].get("stand")
+        buckets = [cross[pt], per_pid[pid][pt]]
+        if stand in ("L", "R"):
+            buckets.append(cross_stand[(pt, stand)])
+        for b in buckets:
             b["stuff"] += s.get("xRV_stuff",    0.0)
             b["loc"]   += s.get("xRV_location", 0.0)
             b["tun"]   += s.get("xRV_tunnel",   0.0)
@@ -758,7 +767,12 @@ def score_aggregate(req: PitchRequest):
         }
 
     by_pt = {pt: g for pt, b in cross.items() if (g := _bucket_to_plus(pt, b)) is not None}
-    resp = {"by_pitch_type": by_pt, "overall": _weighted_overall_agg(by_pt), "per_pitch": per_pitch_arr}
+    by_pt_stand = defaultdict(dict)
+    for (pt, stand), b in cross_stand.items():
+        if (g := _bucket_to_plus(pt, b)) is not None:
+            by_pt_stand[pt][stand] = g
+    resp = {"by_pitch_type": by_pt, "by_pitch_type_stand": dict(by_pt_stand),
+            "overall": _weighted_overall_agg(by_pt), "per_pitch": per_pitch_arr}
 
     if len(distinct_pids) > 1:
         resp["by_pitcher"] = {}
