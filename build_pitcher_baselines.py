@@ -26,6 +26,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from baseline_fallback import primary_fastball_type
+
 
 WINDOW_DAYS = 60
 FB_TYPES = {'FF', 'SI', 'FC'}
@@ -151,8 +154,7 @@ def add_records(out, fb, source_tag, min_pitches, overwrite_warm):
     if len(fb) == 0: return n_new, n_overrode
     for pid, group in fb.groupby('pitcher'):
         key = str(int(pid))
-        counts = group['pitch_type'].value_counts()
-        primary = counts.idxmax()
+        primary = primary_fastball_type(group)   # fastest type, as the stuff model expects
         sub = group[group['pitch_type'] == primary]
         if len(sub) < min_pitches: continue
         existing = out.get(key)

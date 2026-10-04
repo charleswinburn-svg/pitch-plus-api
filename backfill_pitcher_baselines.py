@@ -48,6 +48,7 @@ sys.path.insert(0, str(REPO))
 # Reuse the exact baseline math the nightly build uses, so a backfilled entry
 # is indistinguishable from one produced by build_pitcher_baselines.py.
 from build_pitcher_baselines import prepare_fastballs, baseline_record, MIN_PITCHES
+from baseline_fallback import primary_fastball_type
 
 SAVANT_URL = "https://baseballsavant.mlb.com/statcast_search/csv"
 CHUNK_DAYS = 14
@@ -136,8 +137,8 @@ def build_one(pid, season, start_date, end_date, min_fastballs):
         print(f"  ! only {len(fb)} fastballs (< {min_fastballs}) — skipping")
         return None
 
-    # Primary fastball = most-thrown of {FF, SI, FC}, exactly like add_records().
-    primary = fb["pitch_type"].value_counts().idxmax()
+    # Primary fastball = fastest of {FF, SI, FC}, exactly like add_records().
+    primary = primary_fastball_type(fb)
     sub = fb[fb["pitch_type"] == primary]
     rec = baseline_record(sub, primary, cold=False, source=f"savant_{season}_backfill")
     print(f"  primary FB = {primary} (n={len(sub)}): "

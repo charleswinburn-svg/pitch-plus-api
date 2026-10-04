@@ -42,6 +42,26 @@ _SAMPLE_SRC = {
 }
 
 
+# The stuff model's fastball family is anchored on the pitcher's FASTEST fastball
+# type with >= 10 pitches (models/stuff_model_metadata.json family_definition), and
+# routes pitches within 4 mph of it to the FB sub-model. The baseline must use that
+# same type — "most-thrown" picked a cutter for cutter-heavy pitchers (Rasmussen:
+# FC 90 mph) and sent their 96 mph four-seamer to the off-speed model.
+MIN_FB_PITCHES = 10
+
+
+def primary_fastball_type(fb: pd.DataFrame, min_n: int = MIN_FB_PITCHES):
+    """Fastest FF/SI/FC type (by mean release_speed) with >= min_n pitches;
+    if none qualifies, the most-thrown type. None when fb is empty."""
+    fb = fb[fb['pitch_type'].isin(FB_TYPES)]
+    if fb.empty:
+        return None
+    g = fb.assign(_v=pd.to_numeric(fb['release_speed'], errors='coerce')) \
+          .groupby('pitch_type')['_v'].agg(['size', 'mean'])
+    ok = g[(g['size'] >= min_n) & g['mean'].notna()]
+    return ok['mean'].idxmax() if len(ok) else g['size'].idxmax()
+
+
 def _hand_of(rec: dict) -> str:
     """Handedness of a stored baseline. Most records predate the p_throws field,
     so fall back to the release-side sign (RHP release from the 3B side → x<0,
@@ -104,7 +124,7 @@ def effective_baselines(df: pd.DataFrame, baselines: dict, league: dict) -> dict
         rec = dict(league.get(hand) or league.get('R') or {})   # cold start
         fb = grp[grp['pitch_type'].isin(FB_TYPES)] if has_ptype else grp.iloc[0:0]
         if len(fb):                                  # self-anchor on own fastballs
-            primary = fb['pitch_type'].value_counts().idxmax()
+            primary = primary_fastball_type(fb)
             sub = fb[fb['pitch_type'] == primary]
             for field, col in _SAMPLE_SRC.items():
                 if col in sub.columns:
