@@ -9,3 +9,9 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+
+# Generated pipeline outputs
+games/
+season/games/
+season/season/
+models/*.bak-*.json
