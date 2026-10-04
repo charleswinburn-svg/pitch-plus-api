@@ -152,15 +152,18 @@ else:
 import os
 
 PITCHER_GRADES_DIR = Path(os.environ.get("PITCHER_GRADES_DIR", str(ROOT / "season")))
-pitcher_grades = {}  # {season: {pid_str: {...}}}
+pitcher_grades = {}      # MLB: {season: {pid_str: {...}}}
+pitcher_grades_aaa = {}  # AAA (MLB-scale grades of AAA pitches), kept fully separate
 
 if PITCHER_GRADES_DIR.exists():
     for f in PITCHER_GRADES_DIR.glob("pitcher_grades_*.json"):
         try:
+            is_aaa = f.stem.startswith("pitcher_grades_aaa_")   # never mixed into MLB seasons
             season = int(f.stem.split("_")[-1])
+            store = pitcher_grades_aaa if is_aaa else pitcher_grades
             with open(f) as fh:
-                pitcher_grades[season] = json.load(fh)
-            print(f"Loaded {len(pitcher_grades[season])} pitcher grades for {season} <- {f.name}")
+                store[season] = json.load(fh)
+            print(f"Loaded {len(store[season])} {'AAA' if is_aaa else 'MLB'} pitcher grades for {season} <- {f.name}")
         except Exception as e:
             print(f"Skipping {f.name}: {e}")
 else:
@@ -786,8 +789,13 @@ def score_aggregate(req: PitchRequest):
     return resp
 
 
+def _grades_store(level: str) -> dict:
+    """MLB or AAA season grades. AAA percentiles rank only AAA pitchers."""
+    return pitcher_grades_aaa if str(level).lower() == "aaa" else pitcher_grades
+
+
 @app.get("/pitcher_percentiles/{pitcher_id}")
-def pitcher_percentiles(pitcher_id: int, season: int = 2026, min_n: int = 200):
+def pitcher_percentiles(pitcher_id: int, season: int = 2026, min_n: int = 200, level: str = "mlb"):
     """
     Return Stuff+/Loc+/Tun+/Pitch+ values for one pitcher AND their
     percentile rank within that season's qualified-pitcher distribution.
@@ -796,14 +804,17 @@ def pitcher_percentiles(pitcher_id: int, season: int = 2026, min_n: int = 200):
     Default 200 pitches ≈ 1-2 starts for a starter, several appearances for
     a reliever — low enough to include most active arms without including
     one-batter cameos.
+
+    level=aaa: AAA grades (MLB scale) ranked against AAA pitchers only.
     """
-    if season not in pitcher_grades:
+    store = _grades_store(level)
+    if season not in store:
         return {
-            "error": f"No grades loaded for season {season}",
-            "available_seasons": list(pitcher_grades.keys()),
+            "error": f"No {level.upper()} grades loaded for season {season}",
+            "available_seasons": list(store.keys()),
         }
 
-    grades = pitcher_grades[season]
+    grades = store[season]
     pid_str = str(pitcher_id)
     me = grades.get(pid_str)
     if not me:
@@ -813,6 +824,7 @@ def pitcher_percentiles(pitcher_id: int, season: int = 2026, min_n: int = 200):
     out = {
         "pitcher_id": pitcher_id,
         "season": season,
+        "level": "aaa" if store is pitcher_grades_aaa else "mlb",
         "n_pitches": me.get("n"),
         "qualified": me.get("n", 0) >= min_n,
         "qualified_threshold": min_n,
@@ -828,12 +840,13 @@ def pitcher_percentiles(pitcher_id: int, season: int = 2026, min_n: int = 200):
 
 
 @app.get("/pitcher_grades/{pitcher_id}")
-def pitcher_grade_lookup(pitcher_id: int, season: int = 2026):
+def pitcher_grade_lookup(pitcher_id: int, season: int = 2026, level: str = "mlb"):
     """Raw aggregate for a single pitcher (no percentile)."""
-    if season not in pitcher_grades:
-        return {"error": f"No grades loaded for season {season}"}
+    store = _grades_store(level)
+    if season not in store:
+        return {"error": f"No {level.upper()} grades loaded for season {season}"}
     pid_str = str(pitcher_id)
-    me = pitcher_grades[season].get(pid_str)
+    me = store[season].get(pid_str)
     if not me:
         return {"error": f"Pitcher {pitcher_id} not found"}
     return {"pitcher_id": pitcher_id, "season": season, **me}
@@ -846,19 +859,20 @@ def pitcher_grade_lookup(pitcher_id: int, season: int = 2026):
 # ─────────────────────────────────────────────────────────────────────────
 
 @app.get("/pitcher_grades_distribution")
-def pitcher_grades_distribution(season: int = 2026):
+def pitcher_grades_distribution(season: int = 2026, level: str = "mlb"):
     """
     Return all cached pitcher grades for a season as { pitcher_id: {...} }.
     Used by the PitcherCard's live-scoring path: it computes Stuff+/Loc+/...
     fresh from MLB Stats API, then ranks the result against this distribution
     (filtered client-side to whichever set of eligible pitchers it cares about).
     """
-    if season not in pitcher_grades:
-        return {"error": f"No grades loaded for season {season}",
-                "available_seasons": list(pitcher_grades.keys())}
+    store = _grades_store(level)
+    if season not in store:
+        return {"error": f"No {level.upper()} grades loaded for season {season}",
+                "available_seasons": list(store.keys())}
     return {
         "season": season,
-        "grades": pitcher_grades[season],
+        "grades": store[season],
     }
 
 

@@ -488,7 +488,7 @@ def write_per_game_json(df, output_dir: Path, compress=True):
     return written
 
 
-def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path = None):
+def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path = None, level: str = 'mlb'):
     """
     Build season-level pitcher aggregates with correct Pitch+ scaling.
 
@@ -504,7 +504,14 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
 
     Algebraically these match what you'd get if you graded every individual
     pitch then averaged: avg(100 - 10z) = 100 - 10*avg(z).
+
+    level='aaa': AAA pitches graded on the MLB scale, fully separate from MLB.
+    The norm file is read-only — the final rescale uses the STORED MLB
+    `_<metric>_rescale` params instead of re-fitting them to AAA data, nothing
+    is written back, and output goes only to *_aaa_* files.
     """
+    if level not in ('mlb', 'aaa'):
+        raise ValueError(f"level must be 'mlb' or 'aaa', got {level!r}")
     season_dir = output_dir / 'season'
     season_dir.mkdir(parents=True, exist_ok=True)
 
@@ -662,11 +669,20 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
                     _vals.append(_v); _wts.append(_n)
         if not _vals:
             return
-        _arr = np.array(_vals)
-        _w   = np.array(_wts, dtype=float); _w /= _w.sum()
-        _mean = float(np.average(_arr, weights=_w))
-        _std  = float(np.sqrt(np.average((_arr - _mean) ** 2, weights=_w)))
-        print(f'  {label} raw dist: mean={_mean:.3f}, stdev={_std:.3f}  → rescaling to mean=100, stdev=10')
+        if level == 'aaa':
+            # MLB scale: reuse the MLB population's stored params (read-only).
+            _stored = (pitch_plus_norm or {}).get(f'_{key}_rescale')
+            if not (isinstance(_stored, dict) and _stored.get('stdev', 0) > 0):
+                print(f'  ⚠ no stored MLB {label} rescale in the norm file — AAA {label} left unrescaled')
+                return
+            _mean, _std = float(_stored['mean']), float(_stored['stdev'])
+            print(f'  {label}: applying stored MLB rescale (mean={_mean:.3f}, stdev={_std:.3f})')
+        else:
+            _arr = np.array(_vals)
+            _w   = np.array(_wts, dtype=float); _w /= _w.sum()
+            _mean = float(np.average(_arr, weights=_w))
+            _std  = float(np.sqrt(np.average((_arr - _mean) ** 2, weights=_w)))
+            print(f'  {label} raw dist: mean={_mean:.3f}, stdev={_std:.3f}  → rescaling to mean=100, stdev=10')
         if _std <= 0:
             return
         for _by_pt in pt_out.values():
@@ -679,14 +695,15 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
                         _g[_side][key] = round(100.0 + (_g[_side][key] - _mean) / _std * 10.0, 1)
         for _pid in pitcher_out:
             pitcher_out[_pid][key] = _weighted_overall(pt_out.get(_pid, {}), key)
-        _norm_updates[f'_{key}_rescale'] = {'mean': _mean, 'stdev': _std}
+        if level == 'mlb':
+            _norm_updates[f'_{key}_rescale'] = {'mean': _mean, 'stdev': _std}
 
     _rescale_plus('stuff_plus', 'Stuff+')
     _rescale_plus('loc_plus',   'Loc+')
     _rescale_plus('tun_plus',   'Tun+')
     _rescale_plus('pitch_plus', 'Pitch+')
 
-    if _norm_updates and norm_path and Path(norm_path).exists():
+    if level == 'mlb' and _norm_updates and norm_path and Path(norm_path).exists():
         with open(norm_path) as _f:
             _norm_data = json.load(_f)
         _norm_data.update(_norm_updates)
@@ -694,8 +711,13 @@ def write_season_aggregates(df, output_dir: Path, season: int, norm_path: Path =
             json.dump(_norm_data, _f, indent=2)
         print(f'  Updated {norm_path}: {list(_norm_updates)}')
 
-    pitcher_path = season_dir / f'pitcher_grades_{season}.json'
-    pt_path      = season_dir / f'pitcher_pitch_type_grades_{season}.json'
+    tag = '_aaa' if level == 'aaa' else ''
+    pitcher_path = season_dir / f'pitcher_grades{tag}_{season}.json'
+    pt_path      = season_dir / f'pitcher_pitch_type_grades{tag}_{season}.json'
+    if level == 'aaa':
+        for _p in (pitcher_path, pt_path):
+            if '_aaa_' not in _p.name:
+                raise RuntimeError(f'refusing to write AAA grades to a non-AAA file: {_p}')
 
     with open(pitcher_path, 'w') as f:
         json.dump(pitcher_out, f, separators=(',', ':'))
@@ -720,6 +742,9 @@ def main():
     parser.add_argument('--output-dir', required=True, help='Where to write JSON output')
     parser.add_argument('--season', type=int, default=None,
                         help='Season to tag aggregates (default: infer from data)')
+    parser.add_argument('--level', choices=['mlb', 'aaa'], default='mlb',
+                        help="aaa: grade AAA pitches on the MLB scale into separate *_aaa_* "
+                             "season files (no per-game files, norm file untouched)")
     parser.add_argument('--no-compress', action='store_true',
                         help='Skip gzip compression of per-game files')
     args = parser.parse_args()
@@ -775,11 +800,12 @@ def main():
     print(f'  Mean predicted xRV: {df["xRV_final"].mean():.5f}')
     print(f'  Mean actual xRV:    {df["xRV"].mean():.5f}' if 'xRV' in df.columns else '')
 
-    print('Writing per-game JSON files...')
-    write_per_game_json(df, output_dir, compress=not args.no_compress)
+    if args.level == 'mlb':
+        print('Writing per-game JSON files...')
+        write_per_game_json(df, output_dir, compress=not args.no_compress)
 
-    print(f'Writing season {season} aggregates...')
-    write_season_aggregates(df, output_dir, season, model_dir / "pitch_plus_norm.json")
+    print(f'Writing season {season} {args.level.upper()} aggregates...')
+    write_season_aggregates(df, output_dir, season, model_dir / "pitch_plus_norm.json", level=args.level)
 
     print('Done.')
 
