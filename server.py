@@ -296,8 +296,11 @@ def map_pitch(evt: dict, pitcher_id: Optional[int] = None) -> Optional[dict]:
     }
 
 
-def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
-    """Run feature engineering + 3-stage model on a list of mapped pitches."""
+def engineer_and_score(rows: list[dict], norm_dict: dict = None, contrib: bool = False) -> list[dict]:
+    """Run feature engineering + 3-stage model on a list of mapped pitches.
+
+    contrib=True also returns each pitch's Stuff model TreeSHAP contributions
+    ("stuff_contrib": {feature: xRV}), which sum with the model bias to xRV_stuff."""
     if norm_dict is None:
         norm_dict = pitch_plus_norm
     df = pd.DataFrame(rows)
@@ -464,10 +467,15 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
     ) | (df['fb_velo'].isna() & df['pitch_type'].isin(_STUFF_FB_TYPES))
     same = (df['p_throws'] == df['stand'])
     df['xRV_stuff'] = 0.0
+    contribs = [None] * len(df) if contrib else None
     for key, model in stuff_models.items():
         m = (fb_mask if key.startswith('FB') else ~fb_mask) & (same if key.endswith('same') else ~same)
         if m.any():
             df.loc[m, 'xRV_stuff'] = model.predict(df.loc[m, stuff_features[key]])
+            if contrib:
+                C = model.predict(df.loc[m, stuff_features[key]], pred_contrib=True)
+                for j, pos in enumerate(np.where(m.values)[0]):
+                    contribs[pos] = dict(zip(stuff_features[key], map(float, C[j, :-1])))
 
     # ── Location features ──
     df['plate_x_adj'] = np.where(df['stand']=='L', -df['plate_x'], df['plate_x'])
@@ -552,7 +560,7 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
 
     # ── Convert to Pitch+ (100 = avg, ±10 per std, higher = better) ──
     out = []
-    for i, row in df.iterrows():
+    for pos, (i, row) in enumerate(df.iterrows()):
         pt = row['pitch_type']  # aliased (FO→FS) for norm lookup
         pt_display = row['pitch_type_display']  # original for output
         n = norm_dict.get(pt)
@@ -575,6 +583,8 @@ def engineer_and_score(rows: list[dict], norm_dict: dict = None) -> list[dict]:
             "xRV_tunnel": float(row['xRV_tunnel']),
             "xRV_final": float(row['xRV_final']),
         })
+        if contrib:
+            out[-1]["stuff_contrib"] = contribs[pos] or {}
     return out
 
 
@@ -787,6 +797,57 @@ def score_aggregate(req: PitchRequest):
             }
 
     return resp
+
+
+@app.post("/stuff_breakdown")
+def stuff_breakdown(req: PitchRequest):
+    """Stuff+ per pitch type for one pitcher's pitches (e.g. a single game), overall and
+    vs same-/opposite-handed hitters, with the mean Stuff model contribution of every
+    feature. Grades are /score_aggregate's; no minimum pitch count. The norms and rescale
+    used are returned so a client can grade a baseline on the same scale."""
+    rows = []
+    for evt in req.pitches:
+        mapped = map_pitch(evt, evt.get("pitcher_id") or evt.get("_pitcher_id"))
+        if mapped and _date_in_range(mapped.get("game_date"), req.start_date, req.end_date):
+            rows.append(mapped)
+    if not rows:
+        return {"by_pitch_type": {}, "throws": None, "scale": None}
+    scored = engineer_and_score(rows, pitch_plus_norm, contrib=True)
+
+    buckets = defaultdict(lambda: {"n": 0, "xrv": 0.0, "c": defaultdict(float)})
+    hands = defaultdict(int)
+    for r, s in zip(rows, scored):
+        pt = s.get("pitch_type")
+        hands[r.get("p_throws")] += 1
+        side = "same" if r.get("stand") == r.get("p_throws") else "oppo"
+        for key in ((pt, None), (pt, side)):
+            b = buckets[key]
+            b["n"] += 1
+            b["xrv"] += s.get("xRV_stuff", 0.0)
+            for f, v in (s.get("stuff_contrib") or {}).items():
+                b["c"][f] += v
+
+    def _summ(pt, b):
+        n = b["n"]
+        return {"n": n, "xrv": b["xrv"] / n,
+                "stuff_plus": _per_type_plus_agg(b["xrv"] / n, PITCH_ALIASES.get(pt, pt), "stuff"),
+                "c": {f: v / n for f, v in b["c"].items()}}
+
+    by_pt = {}
+    for (pt, side), b in buckets.items():
+        if side is None:
+            by_pt.setdefault(pt, {}).update(_summ(pt, b))
+    for (pt, side), b in buckets.items():
+        if side is not None:
+            by_pt[pt][side] = _summ(pt, b)
+    norms = {}
+    for pt in by_pt:
+        n = pitch_plus_norm.get(PITCH_ALIASES.get(pt, pt)) or {}
+        if n.get("stuff_std"):
+            norms[pt] = {"stuff_mean": n["stuff_mean"], "stuff_std": n["stuff_std"]}
+    return {"by_pitch_type": by_pt,
+            "throws": max(hands, key=hands.get) if hands else None,
+            "scale": {"norms": norms, "rescale": pitch_plus_norm.get("_stuff_plus_rescale")}}
 
 
 def _grades_store(level: str) -> dict:
